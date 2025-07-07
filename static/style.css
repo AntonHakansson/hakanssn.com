@@ -1,0 +1,272 @@
+:root {
+  /* Set sans-serif & mono fonts */
+  --sans-font: -apple-system, BlinkMacSystemFont, "Avenir Next", Avenir,
+    "Nimbus Sans L", Roboto, "Noto Sans", "Segoe UI", Arial, Helvetica,
+    "Helvetica Neue", sans-serif;
+  --mono-font: Consolas, Menlo, Monaco, "Andale Mono", "Ubuntu Mono", monospace;
+
+  /* Modular Scale */
+  --size-ratio: 1.5;
+  --s-5: calc(var(--s-4) / var(--size-ratio));
+  --s-4: calc(var(--s-3) / var(--size-ratio));
+  --s-3: calc(var(--s-2) / var(--size-ratio));
+  --s-2: calc(var(--s-1) / var(--size-ratio));
+  --s-1: calc(var(--s0) / var(--size-ratio));
+  --s0: 1rem;
+  --s1: calc(var(--s0) * var(--size-ratio));
+  --s2: calc(var(--s1) * var(--size-ratio));
+  --s3: calc(var(--s2) * var(--size-ratio));
+  --s4: calc(var(--s3) * var(--size-ratio));
+  --s5: calc(var(--s4) * var(--size-ratio));
+
+  /* Default (light) theme */
+  --bg: #fff;
+  --accent-bg: #f5f7ff;
+  --text: #212121;
+  --text-light: #585858;
+  --border: #d8dae1;
+  --accent: #0d47a1;
+  --code: #d81b60;
+  --preformatted: #444;
+  --marked: #ffdd33;
+  --disabled: #efefef;
+}
+
+/* Dark theme */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #212121;
+    --accent-bg: #2b2b2b;
+    --text: #dcdcdc;
+    --text-light: #ababab;
+    --border: #666;
+    --accent: #ffb300;
+    --code: #f06292;
+    --preformatted: #ccc;
+    --disabled: #111;
+  }
+}
+
+/* Reset box-sizing */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+/* Measure Axiom */
+:root {
+  --measure: 80ch;
+}
+
+* {
+  max-inline-size: var(--measure);
+}
+
+html,
+body,
+div,
+header,
+nav,
+main,
+footer {
+  max-inline-size: none;
+}
+
+/* Reset default appearance */
+textarea,
+select,
+input,
+progress {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+}
+
+/* Set the font globally */
+html {
+  font-family: var(--sans-font);
+  scroll-behavior: smooth;
+}
+
+/* Make the body a nice central block */
+body {
+  color: var(--text);
+  background-color: var(--bg);
+  margin: 0;
+}
+
+
+
+/* The Stack  */
+.stack {
+  /* The flex context */
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+}
+
+.stack > * {
+    /* Any extant vertical margins are removed */
+    margin-block: 0;
+}
+
+.stack > * + * {
+  /* Top margin is only applied to successive elements */
+  margin-block-start: var(--space, 1.5rem);
+}
+
+
+
+/* The Box */
+.box {
+  /* Padding set to the first point on the modular scale */
+  padding: var(--s1);
+  /* Assumes you have a --border-thin var */
+  border: var(--border-thin) solid;
+  /* Always apply the transparent outline, for high contrast mode */
+  outline: var(--border-thin) transparent;
+  outline-offset: calc(var(--border-thin) * -1);
+  /* Color vars */
+  color: var(--text);
+  background-color: var(--bg);
+}
+
+.box * {
+  /* Force colors to inherit from the parent
+  and honor inversion (below) */
+  color: inherit;
+}
+
+.box.invert {
+  /* The color vars inverted */
+  color: var(--color-light);
+  background-color: var(--color-dark);
+}
+
+
+
+/* The Center */
+.center {
+  /* Remove padding from the width calculation */
+  box-sizing: content-box;
+  /* The maximum width is the maximum measure */
+  max-inline-size: 60ch;
+  /* Only affect horizontal margins */
+  margin-inline: auto;
+  /* Apply the minimum horizontal space */
+  padding-inline-start: var(--s1);
+  padding-inline-end: var(--s1);
+}
+
+
+
+/* The Cluster */
+.cluster {
+  /* Set the Flexbox context */
+  display: flex;
+  /* Enable wrapping */
+  flex-wrap: wrap;
+  /* Set the space/gap */
+  gap: var(--space, 1rem);
+  /* Choose your justification (flex-start is default) */
+  justify-content: center;
+  /* Choose your alignment (flex-start is default) */
+  align-items: center;
+}
+
+/* The Switcher */
+.switcher {
+  display: flex;
+  flex-wrap: wrap;
+  /* The default value is the first point on the modular scale */
+  gap: var(--gutter, var(--s1));
+  /* The width at which the layout “breaks” */
+  --threshold: 30rem;
+}
+
+.switcher > * {
+  /* Allow children to grow */
+  flex-grow: 1;
+  /* Switch the layout at the --threshold */
+  flex-basis: calc((var(--threshold) - 100%) * 999);
+}
+
+.switcher > :nth-last-child(n+5),
+.switcher > :nth-last-child(n+5) ~ * {
+  /* Switch to a vertical configuration if
+  there are more than 4 child elements */
+  flex-basis: 100%;
+}
+
+
+
+/* The Frame */
+.frame {
+  --n: 5; /* numerator */
+  --d: 2; /* denominator */
+  aspect-ratio: var(--n) / var(--d);
+  overflow: hidden;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.frame > img,
+.frame > video {
+  inline-size: 100%;
+  block-size: 100%;
+  object-fit: cover;
+}
+
+
+
+/* The Icon */
+.icon {
+  height: 0.75em;
+  /* Override the em value with `1cap` where `cap` is supported */
+  height: 1.5cap;
+  width: 0.75em;
+  width: 1.5cap;
+  overflow: visible;
+}
+
+.with-icon {
+  /* Set the `inline-flex` context, which eliminates the word space */
+  display: inline-flex;
+  align-items: baseline;
+}
+
+.with-icon .icon {
+  /* Use the logical margin property and a --space variable with a fallback */
+  margin-inline-end: var(--space, 0.5em);
+}
+
+
+
+/* Helpers */
+.m0 { margin: 0; }
+.mts3 { margin-block-start: var(--s3); }
+
+.font-size\:small { font-size: var(--s-1); }
+
+.bg\:accent { background: var(--accent-bg); }
+
+.justify-content\:space-between { justify-content: space-between; }
+.justify-content\:flex-start { justify-content: flex-start; }
+.justify-content\:flex-end { justify-content: flex-end; }
+
+.align-items\:center { align-items: center; }
+.align-text\:center { align-text: center; }
+
+.space-s-1 { --space: var(--s-1); }
+.space-s0 { --space: var(--s0); }
+.space-s1 { --space: var(--s1); }
+
+
+
+/* Specification */
+.tags > span {
+  font-size: var(--s-1);
+  background: var(--accent-bg);
+  padding: var(--s-4) var(--s-1);
+}

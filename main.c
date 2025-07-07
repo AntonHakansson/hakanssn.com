@@ -1,0 +1,808 @@
+#if IN_SHELL /* $ bash main.c
+ mkdir -p generated
+ xxd -i static/style.css > generated/style.css.h
+ xxd -i static/favicon.ico > generated/favicon.ico.h
+ xxd -i static/logo.png > generated/logo.png.h
+ cc main.c -o main -fsanitize=undefined -g3 -Os -Wall -Wextra -Wconversion -Wno-sign-conversion -Wno-unused-function $@
+ exit # */
+#endif
+
+#define assert(c)        while (!(c)) __builtin_unreachable()
+#define tassert(c)       while (!(c)) __builtin_trap()
+#define breakpoint(c)    ((c) ? ({ asm volatile ("int3; nop"); }) : 0)
+#define countof(a)       (Iz)(sizeof(a) / sizeof(*(a)))
+#define new(a, t, n)     ((t *)arena_alloc(a, sizeof(t), _Alignof(t), (n)))
+#define newbeg(a, t, n)  ((t *)arena_alloc_beg(a, sizeof(t), _Alignof(t), (n)))
+#define s8(s)            (S8){(U8 *)s, countof(s)-1}
+#define memcpy(d, s, n)  __builtin_memcpy(d, s, n)
+#define memset(d, c, n)  __builtin_memset(d, c, n)
+
+typedef unsigned char U8;
+typedef signed long long I64;
+typedef typeof((char *)0-(char *)0) Iz;
+typedef typeof(sizeof(0))           Uz;
+
+////////////////////////////////////////////////////////////////////////////////
+//- Arena
+
+typedef struct { U8 *beg; U8 *end; } Arena;
+
+__attribute((malloc, alloc_size(4, 2), alloc_align(3)))
+static U8 *arena_alloc(Arena *a, Iz objsize, Iz align, Iz count) {
+  Iz padding = (Uz)a->end & (align - 1);
+  tassert((count <= (a->end - a->beg - padding) / objsize) && "out of memory");
+  Iz total = objsize * count;
+  return memset(a->end -= total + padding, 0, total);
+}
+
+__attribute((malloc, alloc_size(4, 2), alloc_align(3)))
+static U8 *arena_alloc_beg(Arena *a, Iz objsize, Iz align, Iz count) {
+  Iz padding = -(Uz)(a->beg) & (align - 1);
+  Iz total   = padding + objsize * count;
+  tassert(total < (a->end - a->beg) && "out of memory");
+  U8 *p = a->beg + padding;
+  memset(p, 0, objsize * count);
+  a->beg += total;
+  return p;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//- String
+
+#define s8pri(s) (int)s.len, s.data
+
+typedef struct { U8 *data; Iz len; } S8;
+
+static S8 s8span(U8 *beg, U8 *end) { return (S8){beg, end - beg}; }
+
+static S8 s8dup(Arena *a, S8 s) {
+  return (S8) {
+    memcpy((new(a, U8, s.len)), s.data, s.len * sizeof(U8)),
+    s.len,
+  };
+}
+
+static char *s8z(Arena *a, S8 s) {
+  return memcpy(new(a, char, s.len + 1), s.data, s.len);
+}
+
+static S8 s8cstr(Arena *a, char *cstr) {
+  return s8dup(a, (S8){(U8*)cstr, __builtin_strlen(cstr)});
+}
+
+#define s8concat(arena, head, ...)                                                   \
+  s8concatv(arena, head, ((S8[]){__VA_ARGS__}), (countof(((S8[]){__VA_ARGS__}))))
+
+static S8 s8concatv(Arena *a, S8 head, S8 *ss, Iz count) {
+  S8 r = {0};
+  if (!head.data || (U8 *)(head.data+head.len) != a->beg) {
+    S8 copy = head;
+    copy.data = newbeg(a, U8, head.len);
+    if (head.len) memcpy(copy.data, head.data, head.len);
+    head = copy;
+  }
+  for (Iz i = 0; i < count; i++) {
+    S8 tail = ss[i];
+    U8 *data = newbeg(a, U8, tail.len);
+    if (tail.len) memcpy(data, tail.data, tail.len);
+    head.len += tail.len;
+  }
+  r = head;
+  return r;
+}
+
+static S8 s8trimspace(S8 s) {
+  for (Iz off = 0; off < s.len; off++) {
+    _Bool is_ws = (s.data[off] == ' ' || ((unsigned)s.data[off] - '\t') < 5);
+    if (!is_ws) { return (S8){s.data + off, s.len - off}; }
+  }
+  return s;
+}
+
+static _Bool s8match(S8 a, S8 b, Iz n) {
+  if (a.len < n || b.len < n)  { return 0; }
+  for (Iz i = 0; i < n; i++) {
+    if (a.data[i] != b.data[i]) { return 0; }
+  }
+  return 1;
+}
+
+static _Bool s8equal(S8 a, S8 b) {
+  if (a.len != b.len)  { return 0; }
+  return s8match(a, b, a.len);
+}
+
+#define s8startswith(a, b) s8match((a), (b), (b).len)
+
+static S8 s8tolower(S8 s) {
+  for (Iz i = 0; i < s.len; i++) {
+    if (((unsigned)s.data[i] - 'A') < 26) {
+      s.data[i] |= 32;
+    }
+  }
+  return s;
+}
+
+typedef struct {
+  S8 head, tail;
+} S8pair;
+
+static S8pair s8cut(S8 s, U8 c) {
+  S8pair r = {0};
+  if (s.data) {
+    U8 *beg = s.data;
+    U8 *end = s.data + s.len;
+    U8 *cut = beg;
+    for (; cut < end && *cut != c; cut++) {}
+    r.head = s8span(beg, cut);
+    if (cut < end) {
+      r.tail = s8span(cut + 1, end);
+    }
+  }
+  return r;
+}
+
+static S8 s8i64(Arena *arena, I64 x) {
+  _Bool negative = (x < 0);
+  if (negative) { x = -x; }
+  char digits[20];
+  int i = countof(digits);
+  do {
+    digits[--i] = (char)(x % 10) + '0';
+  } while (x /= 10);
+  Iz len = countof(digits) - i + negative;
+  U8 *beg = new(arena, U8, len);
+  U8 *end = beg;
+  if (negative) { *end++ = '-'; }
+  do { *end++ = digits[i++]; } while (i < countof(digits));
+  return (S8){beg, len};
+}
+
+#include "time.h"
+#include "stdio.h"
+static S8 s8datetime(Arena *arena, I64 timestamp) {
+  time_t time = (time_t)timestamp;
+  struct tm *utc_tm = gmtime(&time);
+
+  if (!utc_tm) {
+    return s8("Invalid date");
+  }
+
+  // Format as YYYY-MM-DD HH:MM:SS UTC
+  char buffer[64];
+  int len = snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d UTC",
+                     utc_tm->tm_year + 1900,
+                     utc_tm->tm_mon + 1,
+                     utc_tm->tm_mday,
+                     utc_tm->tm_hour,
+                     utc_tm->tm_min,
+                     utc_tm->tm_sec);
+
+  if (len < 0 || len >= (int)sizeof(buffer)) {
+    return s8("Date format error");
+  }
+
+  return s8dup(arena, (S8){(U8*)buffer, len});
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//- Error side channel
+
+extern __thread struct ErrList *errors;
+
+typedef struct Err Err;
+struct Err {
+  Err *next;
+  int severity;
+  S8 message;
+};
+
+typedef struct ErrList {
+  Arena rewind_arena; // original [beg, end) range for rewinding
+  Arena arena;
+  Err *first;
+  int max_severity;
+} ErrList;
+
+static ErrList *errors_make(Arena *arena, Iz nbyte) {
+  assert(errors == 0);
+  ErrList *r = new(arena, ErrList, 1);
+  U8 *beg = new(arena, U8, nbyte);
+  r->arena = r->rewind_arena = (Arena){beg, beg + nbyte};
+  return r;
+}
+
+static void errors_clear_() {
+  errors->first = 0;
+  errors->max_severity = 0;
+  errors->arena = errors->rewind_arena;
+}
+
+#define for_errors(varname)                                                    \
+  for (Iz _defer_i_ = 1; _defer_i_; _defer_i_--, errors_clear_())            \
+    for (Err *varname = errors->first; varname && (errors->max_severity > 0);  \
+         varname = varname->next)
+
+static Err *emit_err(int severity, S8 message) {
+  assert(errors && errors->arena.beg);
+  if ((errors->arena.end - errors->arena.beg) <
+      ((Iz)sizeof(Err) + message.len + (1 << 8))) {
+    errors_clear_(); // REVIEW: force flush errors to stderr?
+    emit_err(3, s8("Exceeded error memory limit. Previous errors omitted."));
+  }
+  Err *err = new(&errors->arena, Err, 1);
+  err->severity = severity;
+  err->message = s8dup(&errors->arena, message);
+  err->next = errors->first;
+  errors->first = err;
+  if (severity > errors->max_severity) {
+    errors->max_severity = severity;
+  }
+  return err;
+}
+
+#define emit_errno(scratch, ...)                                               \
+  do {                                                                         \
+    S8 msg = {0};                                                              \
+    msg = s8concat(&scratch, msg, __VA_ARGS__, s8(": "),                       \
+                   s8cstr(&scratch, strerror(errno)));                         \
+    emit_err(3, msg);                                                          \
+  } while (0);
+
+
+////////////////////////////////////////////////////////////////////////////////
+//- File I/O
+
+#include <unistd.h>
+#include <fcntl.h>
+#include <string.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+static S8 read_entire_file(Arena *arena, S8 file) {
+  S8 r = {0};
+  if (file.data) {
+    int fd = 0;
+    Iz len = 0;
+    {
+      Arena scratch = *arena;
+      char *f = s8z(&scratch, file);
+      if ((fd = open(f, O_RDONLY)) < 0) {
+        emit_errno(scratch, s8("open '"), file, s8("'"));
+        return r;
+      }
+      if ((len = lseek(fd, 0, SEEK_END)) < 0) {
+        emit_errno(scratch, s8("lseek '"), file, s8("'"));
+        goto defer;
+      }
+      if (lseek(fd, 0, SEEK_SET) < 0) {
+        emit_errno(scratch, s8("lseek '"), file, s8("'"));
+        goto defer;
+      }
+    }
+
+    U8 *beg = new(arena, U8, len + 1); // note: "+ 1" for '\0'
+    U8 *end = beg;
+    {
+      Arena scratch = *arena;
+      Iz m = len;
+      while (m > 0) {
+        Iz nbyte = 0;
+        do {
+          nbyte = read(fd, end, m);
+        } while (nbyte < 0 && errno == EINTR);
+        if (nbyte < 0) {
+          emit_errno(scratch, s8("read '"), file, s8("'"));
+          goto defer;
+        }
+        end += nbyte;
+        m   -= nbyte;
+      }
+    }
+    r = s8span(beg, end);
+
+  defer:
+    close(fd);
+  }
+  return r;
+}
+
+static void xwrite(Arena scratch, int fd, S8 content) {
+  if (content.data && content.len) {
+    while (content.len > 0) {
+      Iz m = content.len;
+      Iz nbyte = 0;
+      do {
+        nbyte = write(fd, content.data, m);
+      } while (nbyte < 0 && errno == EINTR);
+      if (nbyte < 0) {
+        emit_errno(scratch, s8("write"));
+        return;
+      }
+      content.data += nbyte;
+      content.len -= nbyte;
+    }
+  }
+}
+
+static void write_file(Arena scratch, S8 file, S8 file_content) {
+  if (file.data && file_content.len) {
+    int fd = open(s8z(&scratch, file), O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) {
+      emit_errno(scratch, s8("open '"), file, s8("'"));
+      return;
+    }
+    xwrite(scratch, fd, file_content);
+    close(fd);
+  }
+}
+
+#include <sys/signal.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+
+#define HEAP_CAP (1u << 28)
+
+__thread struct ErrList *errors;
+static volatile int should_exit = 0;
+
+typedef struct {
+  S8 title;
+  S8 slug;
+  S8 summary;
+  S8 tags[16];
+  Iz tags_count;
+  I64 created_at; // Unix timestamp
+  I64 updated_at; // Unix timestamp
+} Post;
+
+typedef struct {
+  Post *posts;
+  Iz posts_count;
+} WebsiteData;
+
+static WebsiteData data = {0};
+
+static WebsiteData get_website_data(Arena *arena) {
+  Post *posts = new(arena, Post, 2);
+
+  // Post 1
+  posts[0] = (Post){
+    .title = s8("Contigous-aware Arena allocator"),
+    .slug = s8("some-other-post-title"),
+    .summary = s8("Utilising front and back of the Arena to avoid "),
+    .created_at = 1651968000, // 2022-05-08 00:00:00 UTC
+    .updated_at = 1651968000, // REVIEW: Do I really want to adjust this manually? Get from file instead?
+  };
+  posts[0].tags[0] = s8("C/C++");
+  posts[0].tags_count = 1;
+
+  // Post 2
+  posts[1] = (Post){
+    .title = s8("Some post title"),
+    .slug = s8("some-post-title"),
+    .summary = s8("Writing a modest personal web server in C"),
+    .created_at = 1651795200, // 2022-05-06 00:00:00 UTC
+    .updated_at = 1651795200,
+  };
+  posts[1].tags[0] = s8("Go");
+  posts[1].tags[1] = s8("NixOS");
+  posts[1].tags_count = 2;
+
+  return (WebsiteData){
+    .posts = posts,
+    .posts_count = 2,
+  };
+}
+
+static void signal_handler(int sig) {
+  (void)sig;
+  should_exit = 1;
+}
+
+static int socket_bind_listen(Arena scratch, unsigned short port, int n_backlog) {
+  int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (sock_fd < 0) {
+    emit_errno(scratch, s8("socket"));
+    return 0;
+  }
+
+  int enable_reuse = 1;
+  if ((setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &enable_reuse, sizeof(enable_reuse))) < 0) {
+    emit_errno(scratch, s8("setsockopt"));
+    goto err_op;
+  }
+  if ((setsockopt(sock_fd, SOL_SOCKET, SO_REUSEPORT, &enable_reuse, sizeof(enable_reuse))) < 0) {
+    emit_errno(scratch, s8("setsockopt"));
+    goto err_op;
+  }
+
+  struct sockaddr_in server_addr = {0};
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_port = htons(port);       // Convert to network byte order
+  server_addr.sin_addr.s_addr = INADDR_ANY; // Bind to all interfaces
+
+  if ((bind(sock_fd, (struct sockaddr *)&server_addr, sizeof(server_addr))) < 0) {
+    emit_errno(scratch, s8("bind"));
+    goto err_op;
+  }
+
+  if ((listen(sock_fd, n_backlog)) < 0) {
+    emit_errno(scratch, s8("listen"));
+    goto err_op;
+  }
+
+  return sock_fd;
+
+err_op:
+  close(sock_fd);
+  return 0;
+}
+
+static S8 begin_page(Arena *arena) {
+  S8 s = {};
+
+  s = s8concat(arena, s, s8("<!DOCTYPE html>\n"));
+  s = s8concat(arena, s, s8("<html lang=\"en\">\n"));
+
+  s = s8concat(arena, s, s8("<head>\n"));
+  s = s8concat(arena, s, s8("  <meta charset=\"UTF-8\">\n"));
+
+  s = s8concat(arena, s, s8("  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"));
+  s = s8concat(arena, s, s8("  <title>hakanssn</title>\n"));
+  s = s8concat(arena, s, s8("  <meta name=\"description\" content=\"hakanssn personal website, portfolio, and blog\">\n"));
+  S8 font_awesome = s8("<link rel=\"stylesheet\" href=\"https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.2/css/all.min.css\"\n  integrity=\"sha512-HK5fgLBL+xu6dm/Ii3z4xhlSUyZgTT9tuc/hSrtw6uzJOvgRr2a9jyxxT1ely+B+xFAmJKVSTbpM/CuL7qxO8w==\"\n  crossorigin=\"anonymous\"/>\n");
+  s = s8concat(arena, s, font_awesome);
+  s = s8concat(arena, s, s8("<link rel=\"stylesheet\" href=\"/style.css\" />\n"));
+
+  s = s8concat(arena, s, s8("</head>\n"));
+
+  s = s8concat(arena, s, s8("<body>\n"));
+  s = s8concat(arena, s, s8("<div class=\"box\">\n"));
+  s = s8concat(arena, s, s8("<div class=\"center\">\n"));
+  s = s8concat(arena, s, s8("<div class=\"stack\">\n"));
+
+  s = s8concat(arena, s,
+           s8("<header class=\"box bg:accent\">\n"),
+           s8("<div class=\"cluster justify-content:space-between\">\n"),
+           s8("<a href=\"/\"><img src=\"/logo.png\" alt=\"logo\" style=\"max-height: 52px;\"/></a>\n"),
+           s8("<nav class=\"cluster\">\n"),
+           s8("<a href=\"/post\">Posts</a>\n"),
+           s8("<a href=\"/project\">Projects</a>\n"),
+           s8("<a href=\"https://github.com/AntonHakansson\">Github</a>\n"),
+           s8("</nav>\n"),
+           s8("</div>\n"),
+           s8("</header>\n"));
+
+  return s;
+}
+
+static S8 end_page(Arena *arena, S8 s) {
+  s = s8concat(arena, s,
+    s8("<footer class=\"box bg:accent\">\n"),
+    s8("    <div class=\"cluster\">\n"),
+    s8("        <span class=\"with-icon\">\n"),
+    s8("            <i class=\"icon fab fa-github\"></i>\n"),
+    s8("            <a href=\"https://github.com/AntonHakansson/\">Github</a>\n"),
+    s8("        </span>\n"),
+    s8("\n"),
+    s8("        <span class=\"with-icon\">\n"),
+    s8("            <i class=\"icon fas fa-envelope\"></i>\n"),
+    s8("            <a href=\"mailto:anton@hakanssn.com\">Contact</a>\n"),
+    s8("        </span>\n"),
+    s8("\n"),
+    s8("        <span class=\"with-icon\">\n"),
+    s8("            <i class=\"icon fas fa-rss\"></i>\n"),
+    s8("            <a href=\"hakanssn.com/rss\">Subscribe</a>\n"),
+    s8("        </span>\n"),
+    s8("\n"),
+    s8("        <span class=\"with-icon\">\n"),
+    s8("            <i class=\"icon fas fa-code\"></i>\n"),
+    s8("            <a href=\"https://github.com/AntonHakansson/hakanssn.com\">View source</a>\n"),
+    s8("        </span>\n"),
+    s8("        <p>Built with custom web server © 2025</p>\n"),
+    s8("    </div>\n"),
+    s8("</footer>\n"));
+
+  s = s8concat(arena, s, s8("</div>\n"));
+  s = s8concat(arena, s, s8("</div>\n"));
+  s = s8concat(arena, s, s8("</div>\n"));
+
+  s = s8concat(arena, s, s8("</body>\n"));
+  s = s8concat(arena, s, s8("</html>\n"));
+  return s;
+}
+
+static S8 get_posts_listing(Arena *arena, WebsiteData data, Iz count) {
+  S8 s = {};
+  for (Iz i = 0; i < data.posts_count && i < count; i++) {
+    Post *post = &data.posts[i];
+    s = s8concat(arena, s,
+                 s8("<div>\n"),
+                 s8("<div class=\"cluster justify-content:space-between\">\n"),
+                 s8("<h3 class=\"m0\"><a href=\"/post/"), post->slug, s8("\">"), post->title, s8("</a></h3>\n"),
+                 s8("<div class=\"cluster tags space-s-1\">\n"));
+    for (Iz tag_i = 0; tag_i < post->tags_count; tag_i++) {
+      s = s8concat(arena, s,
+                   s8("<span>"), post->tags[tag_i], s8("</span>\n"));
+    }
+    S8 created_at = s8datetime(arena, post->created_at);
+    s = s8concat(arena, s,
+                 s8("</div>\n"),
+                 s8("</div>\n"),
+                 s8("<span class=\"with-icon font-size:small\">\n"),
+                 s8(""), created_at, s8("\n"),
+                 s8("</span>\n"),
+                 s8("<p>"), post->summary, s8("</p>\n"),
+                 s8("</div>\n"));
+  }
+  return s;
+}
+
+static S8 home_page(Arena *arena, WebsiteData data) {
+  S8 s = {};
+  s = begin_page(arena);
+  
+  s = s8concat(arena, s,
+               s8("<section>\n"
+                 "<h1>About</h1>\n"
+                 "<p>This is a modest personal website where I write about tech, linux tinkering, and showcase projects.</p>\n"
+                 "</section>\n"));
+
+  s = s8concat(arena, s,
+               s8("<section>\n"),
+               s8("    <h1 class=\"with-icon\">Posts</h1>\n"),
+               s8("    <div class=\"stack\">\n"));
+  s = s8concat(arena, s, get_posts_listing(arena, data, 5));
+  s = s8concat(arena, s,
+               s8("        <a href=\"/post\">⬇ See more posts</a>\n"),
+               s8("    </div>\n"),
+               s8("</section>\n"));
+
+  s = end_page(arena, s);
+  return s;
+}
+
+static S8 posts_page(Arena *arena, WebsiteData data, S8 tags[16], Iz tags_count) {
+  (void)tags, (void)tags_count;
+  S8 s = {};
+  s = begin_page(arena);
+
+  s = s8concat(arena, s,
+               s8("<section>\n"),
+               s8("    <h1 class=\"with-icon\">Posts</h1>\n"),
+               s8("    <div class=\"stack\">\n"));
+  s = s8concat(arena, s, get_posts_listing(arena, data, 128));
+  s = s8concat(arena, s,
+               s8("        <a href=\"/post\">⬇ See more posts</a>\n"),
+               s8("    </div>\n"),
+               s8("</section>\n"));
+
+  s = end_page(arena, s);
+  return s;
+}
+
+typedef struct {
+  S8 path;
+} Client_Request;
+
+static Client_Request parse_client_request(S8 request) {
+  Client_Request r = {0};
+  r.path = s8("/");
+
+  S8pair linecut = { {}, request};
+  while ((linecut = s8cut(linecut.tail, '\n')).head.data) {
+    if (s8startswith(linecut.head, s8("GET "))) {
+      S8pair get_parts = {{}, linecut.head};
+      get_parts = s8cut(get_parts.tail, ' '); // discard GET
+      get_parts = s8cut(get_parts.tail, ' ');
+      _Bool is_valid_path(S8 s) {
+        // Only allow a-z, ., and /
+        _Bool valid = 0;
+        for (Iz i = 0; i < s.len; i++) {
+          _Bool is_alpha_lower = s.data[i] >= 'a' && s.data[i] <= 'z';
+          valid = is_alpha_lower || s.data[i] == '/' || s.data[i] == '.';
+          if (!valid) return 0;
+        }
+        return valid;
+      }
+      if (is_valid_path(get_parts.head)) {
+        r.path = get_parts.head;
+      }
+      else {
+        printf("[DEBUG]: Client wants invalid resource: '%.*s'\n", s8pri(get_parts.head));
+      }
+      break; // REVIEW: Remove break statement if we ever parse more than GET header
+    }
+  }
+
+  return r;
+}
+
+#include "generated/style.css.h"
+#include "generated/favicon.ico.h"
+#include "generated/logo.png.h"
+
+static S8 route_response(Arena *arena, Client_Request request) {
+  S8 response = {};
+  if (s8equal(request.path, s8("/style.css"))) {
+    S8 css_content = {
+      .data = static_style_css,
+      .len = static_style_css_len,
+    };
+    response =
+      s8concat(arena, s8("HTTP/1.1 200 OK\r\n"),
+               s8("Content-Type: text/css; charset=UTF-8\r\n"),
+               s8("Content-Length: "), s8i64(arena, css_content.len), s8("\r\n"),
+               s8("Connection: close\r\n"),
+               s8("Cache-Control: public, max-age=86400\r\n"), // Cache for 1 day
+               s8("\r\n"),
+               css_content);
+  }
+  else if (s8equal(request.path, s8("/favicon.ico"))) {
+    S8 favicon_content = {
+      .data = static_favicon_ico,
+      .len = static_favicon_ico_len,
+    };
+    response =
+      s8concat(arena, s8("HTTP/1.1 200 OK\r\n"),
+               s8("Content-Type: image/x-icon\r\n"),
+               s8("Content-Length: "), s8i64(arena, favicon_content.len), s8("\r\n"),
+               s8("Connection: close\r\n"),
+               s8("Cache-Control: public, max-age=86400\r\n"), // Cache for 1 day
+               s8("\r\n"),
+               favicon_content);
+  }
+  else if (s8equal(request.path, s8("/logo.png"))) {
+    S8 logo_content = {
+      .data = static_logo_png,
+      .len = static_logo_png_len,
+    };
+    response =
+      s8concat(arena, s8("HTTP/1.1 200 OK\r\n"),
+               s8("Content-Type: image/x-icon\r\n"),
+               s8("Content-Length: "), s8i64(arena, logo_content.len), s8("\r\n"),
+               s8("Connection: close\r\n"),
+               s8("Cache-Control: public, max-age=86400\r\n"), // Cache for 1 day
+               s8("\r\n"),
+               logo_content);
+  }
+  else if (s8equal(request.path, s8("/post"))) {
+    S8 html_content = posts_page(arena, data, 0, 0);
+    response =
+      s8concat(arena, s8("HTTP/1.1 200 OK\r\n"),
+               s8("Content-Type: text/html; charset=UTF-8\r\n"),
+               s8("Content-Length: "), s8i64(arena, html_content.len), s8("\r\n"),
+               s8("Connection: close\r\n"),
+               s8("X-Content-Type-Options: nosniff\r\n"),
+               s8("X-Frame-Options: DENY\r\n"),
+               s8("\r\n"),
+               html_content);
+  }
+  else if (s8equal(request.path, s8("/")) || s8equal(request.path, s8("/index.html"))) {
+    S8 html_content = home_page(arena, data);
+    response =
+      s8concat(arena, s8("HTTP/1.1 200 OK\r\n"),
+               s8("Content-Type: text/html; charset=UTF-8\r\n"),
+               s8("Content-Length: "), s8i64(arena, html_content.len), s8("\r\n"),
+               s8("Connection: close\r\n"),
+               s8("X-Content-Type-Options: nosniff\r\n"),
+               s8("X-Frame-Options: DENY\r\n"),
+               s8("\r\n"),
+               html_content);
+  }
+  else {
+    S8 not_found_html
+      = s8concat(arena,
+                 s8("<!DOCTYPE html>\n"),
+                 s8("<html><head><title>404 Not Found</title></head>\n"),
+                 s8("<body><h1>404 Not Found</h1>\n"),
+                 s8("<p>The requested resource was not found.</p></body></html>\n"));
+
+    response
+      = s8concat(arena,
+                 s8("HTTP/1.1 404 Not Found\r\n"),
+                 s8("Content-Type: text/html; charset=UTF-8\r\n"),
+                 s8("Content-Length: "), s8i64(arena, not_found_html.len), s8("\r\n"),
+                 s8("Connection: close\r\n"),
+                 s8("\r\n"),
+                 not_found_html);
+  }
+
+  return response;
+}
+
+#if !__AFL_COMPILER
+
+int main(int argc, char **argv)
+{
+  (void) argc, (void) argv;
+  U8 *heap = malloc(HEAP_CAP);
+  Arena arena[1] = { (Arena){heap, heap + HEAP_CAP}, };
+
+  errors = errors_make(arena, 1 << 12);
+
+  int sock_fd = socket_bind_listen(*arena, 8000, 128);
+  {
+    int status_code = !!errors->max_severity;
+    for_errors(err) { fprintf(stderr, "[ERROR]: %.*s\n", s8pri(err->message)); }
+    if (status_code != 0) return status_code;
+  }
+
+  signal(SIGINT,  signal_handler);  // Ctrl+C
+  signal(SIGTERM, signal_handler);  // kill command
+
+  data = get_website_data(arena);
+
+  while (!should_exit) {
+    Arena conn_arena = *arena;
+
+    int fd = accept(sock_fd, 0, 0);
+    if (fd < 0) { emit_errno(conn_arena, s8("accept")); }
+
+    Client_Request client_request = {0}; {
+      Iz read_buffer_len = 1024;
+      U8 *read_buffer = new(&conn_arena, U8, 1024);
+      ssize_t nbyte = read(fd, read_buffer, read_buffer_len);
+      client_request = parse_client_request((S8){read_buffer, nbyte});
+    }
+    S8 response = route_response(&conn_arena, client_request);
+    xwrite(conn_arena, fd, response);
+
+    int status_code = !!errors->max_severity;
+    for_errors(err) { fprintf(stderr, "[ERROR]: %.*s\n", s8pri(err->message)); }
+    if (status_code == 0) {
+      printf("[DEBUG]: Client gets resource: '%.*s'\n", s8pri(client_request.path));
+      printf("[DEBUG]: Request Memory Usage: %ld\n",
+             (conn_arena.beg - arena->beg) + (arena->end - conn_arena.end));
+    }
+
+    close(fd);
+  }
+
+  close(sock_fd);
+
+  int status_code = !!errors->max_severity;
+  for_errors(err) { fprintf(stderr, "[ERROR]: %.*s\n", s8pri(err->message)); }
+  return status_code;
+}
+#endif
+
+
+#ifdef __AFL_COMPILER
+
+#include <sys/mman.h>
+#include <unistd.h>
+
+__AFL_FUZZ_INIT();
+
+int main() {
+  __AFL_INIT();
+  U8 *heap = malloc(HEAP_CAP);
+  assert(heap);
+  Arena arena[1] = { (Arena){heap, heap + HEAP_CAP}, };
+
+  errors = make_errors(arena, 1 << 12);
+
+  int input  = memfd_create("fuzz_in",  0);
+  int output = memfd_create("fuzz_out", 0);
+  assert(input  == 3 && "We assume input file gets located at /proc/self/fd/3");
+  assert(output == 4 && "We assume input file gets located at /proc/self/fd/4");
+
+  unsigned char *buf = __AFL_FUZZ_TESTCASE_BUF;
+  while (__AFL_LOOP(10000)) {
+    int len = __AFL_FUZZ_TESTCASE_LEN;
+    ftruncate(input, 0);
+    pwrite(input, buf, len, 0);
+
+    S8 file_content = read_entire_file(arena, s8("/proc/self/fd/3"));
+    S8 new_content = generate(arena, file_content);
+    write_file(*arena, s8("/proc/self/fd/4"), new_content);
+    for_errors(err) {
+      fprintf(stderr, "[ERROR]: %.*s\n", s8pri(err->message));
+    }
+  }
+}
+
+#endif
