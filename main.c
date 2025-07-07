@@ -780,25 +780,15 @@ __AFL_FUZZ_INIT();
 int main() {
   __AFL_INIT();
   U8 *heap = malloc(HEAP_CAP);
-  assert(heap);
   Arena arena[1] = { (Arena){heap, heap + HEAP_CAP}, };
-
-  errors = make_errors(arena, 1 << 12);
-
-  int input  = memfd_create("fuzz_in",  0);
-  int output = memfd_create("fuzz_out", 0);
-  assert(input  == 3 && "We assume input file gets located at /proc/self/fd/3");
-  assert(output == 4 && "We assume input file gets located at /proc/self/fd/4");
+  errors = errors_make(arena, 1 << 12);
+  data = get_website_data(arena);
 
   unsigned char *buf = __AFL_FUZZ_TESTCASE_BUF;
   while (__AFL_LOOP(10000)) {
     int len = __AFL_FUZZ_TESTCASE_LEN;
-    ftruncate(input, 0);
-    pwrite(input, buf, len, 0);
-
-    S8 file_content = read_entire_file(arena, s8("/proc/self/fd/3"));
-    S8 new_content = generate(arena, file_content);
-    write_file(*arena, s8("/proc/self/fd/4"), new_content);
+    Client_Request client_request = parse_client_request((S8){buf, len});
+    S8 response = route_response(arena, client_request);
     for_errors(err) {
       fprintf(stderr, "[ERROR]: %.*s\n", s8pri(err->message));
     }
