@@ -1,7 +1,10 @@
 ---
 title: Build contiguous structures with Arena allocator
 slug: uninterrupted-contiguous-data-structures-with-arena
+summary: Reserve the front for growing data structures
+tags: C
 created_at: 2025-07-07
+updated_at: 2025-07-07
 ---
 
 # Arena Allocator: Default to allocating from the back!

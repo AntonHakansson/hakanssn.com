@@ -343,16 +343,7 @@ static void write_file(Arena scratch, S8 file, S8 file_content) {
 __thread struct ErrList *errors;
 static volatile int should_exit = 0;
 
-typedef struct {
-  S8 title;
-  S8 slug;
-  S8 summary;
-  S8 html_content;
-  S8 tags[16];
-  Iz tags_count;
-  I64 created_at; // Unix timestamp
-  I64 updated_at; // Unix timestamp
-} Post;
+#include "generated_metadata.h"
 
 typedef struct {
   Post *posts;
@@ -361,24 +352,10 @@ typedef struct {
 
 static WebsiteData data = {0};
 
-#include "generated/posts.h"
-static WebsiteData get_website_data(Arena *arena) {
-  Post *posts = new(arena, Post, 2);
-  posts[0] = (Post){
-    .title = s8("Build contiguous structures with Arena allocator"),
-    .slug = s8("uninterrupted-contiguous-data-structures-with-arena"),
-    .summary = s8("Using front and back of Arena allocator for uninterruptedly building contiguous data structures."),
-    .html_content = (S8){generated_post_arena_html, generated_post_arena_html_len},
-    .created_at = 1651968000, // 2022-05-08 00:00:00 UTC
-    .updated_at = 1651968000, // REVIEW: Do I really want to adjust this manually? Get from file instead?
-    .tags = {
-      [0] = s8("C"),
-    },
-    .tags_count = 1
-  };
+static WebsiteData get_website_data() {
   return (WebsiteData){
-    .posts = posts,
-    .posts_count = 1,
+    .posts = static_posts,
+    .posts_count = countof(static_posts),
   };
 }
 
@@ -513,12 +490,11 @@ static S8 get_posts_listing(Arena *arena, WebsiteData data, Iz count) {
       s = s8concat(arena, s,
                    s8("<span>"), post->tags[tag_i], s8("</span>\n"));
     }
-    S8 created_at = s8datetime(arena, post->created_at);
     s = s8concat(arena, s,
                  s8("</div>\n"),
                  s8("</div>\n"),
                  s8("<span class=\"with-icon font-size:small\">\n"),
-                 s8(""), created_at, s8("\n"),
+                 s8(""), post->created_at, s8("\n"),
                  s8("</span>\n"),
                  s8("<p>"), post->summary, s8("</p>\n"),
                  s8("</div>\n"));
@@ -615,55 +591,25 @@ static Client_Request parse_client_request(S8 request) {
   return r;
 }
 
-#include "generated/style.css.h"
-#include "generated/favicon.ico.h"
-#include "generated/logo.png.h"
-
 static S8 route_response(Arena *arena, Client_Request request) {
   S8 response = {};
-  if (s8equal(request.path, s8("/style.css"))) {
-    S8 css_content = {
-      .data = static_style_css,
-      .len = static_style_css_len,
-    };
-    response =
-      s8concat(arena, s8("HTTP/1.1 200 OK\r\n"),
-               s8("Content-Type: text/css; charset=UTF-8\r\n"),
-               s8("Content-Length: "), s8i64(arena, css_content.len), s8("\r\n"),
-               s8("Connection: close\r\n"),
-               s8("Cache-Control: public, max-age=86400\r\n"), // Cache for 1 day
-               s8("\r\n"),
-               css_content);
+
+  for (Iz i = 0; i < countof(static_route_mapping); i++) {
+    StaticRouteMapping *resource = &static_route_mapping[i];
+    if (s8equal(request.path, resource->path)) {
+      response =
+        s8concat(arena, s8("HTTP/1.1 200 OK\r\n"),
+                 s8("Content-Type: "), resource->content_type, s8("\r\n"),
+                 s8("Content-Length: "), s8i64(arena, resource->content.len), s8("\r\n"),
+                 s8("Connection: close\r\n"),
+                 s8("Cache-Control: public, max-age=86400\r\n"), // Cache for 1 day
+                 s8("\r\n"),
+                 resource->content);
+      return response;
+    }
   }
-  else if (s8equal(request.path, s8("/favicon.ico"))) {
-    S8 favicon_content = {
-      .data = static_favicon_ico,
-      .len = static_favicon_ico_len,
-    };
-    response =
-      s8concat(arena, s8("HTTP/1.1 200 OK\r\n"),
-               s8("Content-Type: image/x-icon\r\n"),
-               s8("Content-Length: "), s8i64(arena, favicon_content.len), s8("\r\n"),
-               s8("Connection: close\r\n"),
-               s8("Cache-Control: public, max-age=86400\r\n"), // Cache for 1 day
-               s8("\r\n"),
-               favicon_content);
-  }
-  else if (s8equal(request.path, s8("/logo.png"))) {
-    S8 logo_content = {
-      .data = static_logo_png,
-      .len = static_logo_png_len,
-    };
-    response =
-      s8concat(arena, s8("HTTP/1.1 200 OK\r\n"),
-               s8("Content-Type: image/x-icon\r\n"),
-               s8("Content-Length: "), s8i64(arena, logo_content.len), s8("\r\n"),
-               s8("Connection: close\r\n"),
-               s8("Cache-Control: public, max-age=86400\r\n"), // Cache for 1 day
-               s8("\r\n"),
-               logo_content);
-  }
-  else if (s8equal(request.path, s8("/post"))) {
+
+  if (s8equal(request.path, s8("/post"))) {
     S8 html_content = posts_page(arena, data, 0, 0);
     response =
       s8concat(arena, s8("HTTP/1.1 200 OK\r\n"),
@@ -753,7 +699,7 @@ int main(int argc, char **argv)
   signal(SIGINT,  signal_handler);  // Ctrl+C
   signal(SIGTERM, signal_handler);  // kill command
 
-  data = get_website_data(arena);
+  data = get_website_data();
 
   while (!should_exit) {
     Arena conn_arena = *arena;
@@ -802,7 +748,7 @@ int main() {
   U8 *heap = malloc(HEAP_CAP);
   Arena arena[1] = { (Arena){heap, heap + HEAP_CAP}, };
   errors = errors_make(arena, 1 << 12);
-  data = get_website_data(arena);
+  data = get_website_data();
 
   unsigned char *buf = __AFL_FUZZ_TESTCASE_BUF;
   while (__AFL_LOOP(10000)) {
