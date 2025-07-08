@@ -1,8 +1,4 @@
 #if IN_SHELL /* $ bash main.c
- mkdir -p generated
- xxd -i static/style.css > generated/style.css.h
- xxd -i static/favicon.ico > generated/favicon.ico.h
- xxd -i static/logo.png > generated/logo.png.h
  cc main.c -o main -fsanitize=undefined -g3 -Os -Wall -Wextra -Wconversion -Wno-sign-conversion -Wno-unused-function $@
  exit # */
 #endif
@@ -351,6 +347,7 @@ typedef struct {
   S8 title;
   S8 slug;
   S8 summary;
+  S8 html_content;
   S8 tags[16];
   Iz tags_count;
   I64 created_at; // Unix timestamp
@@ -364,35 +361,24 @@ typedef struct {
 
 static WebsiteData data = {0};
 
+#include "generated/posts.h"
 static WebsiteData get_website_data(Arena *arena) {
   Post *posts = new(arena, Post, 2);
-
-  // Post 1
   posts[0] = (Post){
-    .title = s8("Contigous-aware Arena allocator"),
-    .slug = s8("some-other-post-title"),
-    .summary = s8("Utilising front and back of the Arena to avoid "),
+    .title = s8("Build contiguous structures with Arena allocator"),
+    .slug = s8("uninterrupted-contiguous-data-structures-with-arena"),
+    .summary = s8("Using front and back of Arena allocator for uninterruptedly building contiguous data structures."),
+    .html_content = (S8){generated_post_arena_html, generated_post_arena_html_len},
     .created_at = 1651968000, // 2022-05-08 00:00:00 UTC
     .updated_at = 1651968000, // REVIEW: Do I really want to adjust this manually? Get from file instead?
+    .tags = {
+      [0] = s8("C"),
+    },
+    .tags_count = 1
   };
-  posts[0].tags[0] = s8("C/C++");
-  posts[0].tags_count = 1;
-
-  // Post 2
-  posts[1] = (Post){
-    .title = s8("Some post title"),
-    .slug = s8("some-post-title"),
-    .summary = s8("Writing a modest personal web server in C"),
-    .created_at = 1651795200, // 2022-05-06 00:00:00 UTC
-    .updated_at = 1651795200,
-  };
-  posts[1].tags[0] = s8("Go");
-  posts[1].tags[1] = s8("NixOS");
-  posts[1].tags_count = 2;
-
   return (WebsiteData){
     .posts = posts,
-    .posts_count = 2,
+    .posts_count = 1,
   };
 }
 
@@ -469,7 +455,7 @@ static S8 begin_page(Arena *arena) {
            s8("<a href=\"/\"><img src=\"/logo.png\" alt=\"logo\" style=\"max-height: 52px;\"/></a>\n"),
            s8("<nav class=\"cluster\">\n"),
            s8("<a href=\"/post\">Posts</a>\n"),
-           s8("<a href=\"/project\">Projects</a>\n"),
+           /* s8("<a href=\"/project\">Projects</a>\n"), */
            s8("<a href=\"https://github.com/AntonHakansson\">Github</a>\n"),
            s8("</nav>\n"),
            s8("</div>\n"),
@@ -492,16 +478,16 @@ static S8 end_page(Arena *arena, S8 s) {
     s8("            <a href=\"mailto:anton@hakanssn.com\">Contact</a>\n"),
     s8("        </span>\n"),
     s8("\n"),
-    s8("        <span class=\"with-icon\">\n"),
-    s8("            <i class=\"icon fas fa-rss\"></i>\n"),
-    s8("            <a href=\"hakanssn.com/rss\">Subscribe</a>\n"),
-    s8("        </span>\n"),
-    s8("\n"),
+    /* s8("        <span class=\"with-icon\">\n"), */
+    /* s8("            <i class=\"icon fas fa-rss\"></i>\n"), */
+    /* s8("            <a href=\"hakanssn.com/rss\">Subscribe</a>\n"), */
+    /* s8("        </span>\n"), */
+    /* s8("\n"), */
     s8("        <span class=\"with-icon\">\n"),
     s8("            <i class=\"icon fas fa-code\"></i>\n"),
     s8("            <a href=\"https://github.com/AntonHakansson/hakanssn.com\">View source</a>\n"),
     s8("        </span>\n"),
-    s8("        <p>Built with custom web server © 2025</p>\n"),
+    s8("        <p>Built with custom HTTP server © 2025</p>\n"),
     s8("    </div>\n"),
     s8("</footer>\n"));
 
@@ -583,6 +569,15 @@ static S8 posts_page(Arena *arena, WebsiteData data, S8 tags[16], Iz tags_count)
   return s;
 }
 
+static S8 post_page(Arena *arena, Post *post) {
+  S8 s = begin_page(arena);
+  s = s8concat(arena, s, s8("<section>\n"));
+  s = s8concat(arena, s, post->html_content);
+  s = s8concat(arena, s, s8("</section>\n"));
+  s = end_page(arena, s);
+  return s;
+}
+
 typedef struct {
   S8 path;
 } Client_Request;
@@ -598,11 +593,11 @@ static Client_Request parse_client_request(S8 request) {
       get_parts = s8cut(get_parts.tail, ' '); // discard GET
       get_parts = s8cut(get_parts.tail, ' ');
       _Bool is_valid_path(S8 s) {
-        // Only allow a-z, ., and /
+        // Only allow a-z, ., -, and /
         _Bool valid = 0;
         for (Iz i = 0; i < s.len; i++) {
           _Bool is_alpha_lower = s.data[i] >= 'a' && s.data[i] <= 'z';
-          valid = is_alpha_lower || s.data[i] == '/' || s.data[i] == '.';
+          valid = is_alpha_lower || s.data[i] == '/' || s.data[i] == '.' || s.data[i] == '-';
           if (!valid) return 0;
         }
         return valid;
@@ -691,6 +686,31 @@ static S8 route_response(Arena *arena, Client_Request request) {
                s8("X-Frame-Options: DENY\r\n"),
                s8("\r\n"),
                html_content);
+  }
+  else if (s8startswith(request.path, s8("/post/"))) {
+    S8 request_post = {0}; {
+      S8pair slug_cut = s8cut(request.path, '/');
+      slug_cut = s8cut(slug_cut.tail, '/');
+      slug_cut = s8cut(slug_cut.tail, '/');
+      request_post = slug_cut.head;
+    }
+    printf("[DEBUG]: %.*s\n", s8pri(request_post));
+    for (Iz post_i = 0; post_i < data.posts_count; post_i++) {
+      Post *post = &data.posts[post_i];
+      if (s8equal(post->slug, request_post)) {
+        S8 html_content = post_page(arena, post);
+        response =
+          s8concat(arena, s8("HTTP/1.1 200 OK\r\n"),
+                   s8("Content-Type: text/html; charset=UTF-8\r\n"),
+                   s8("Content-Length: "), s8i64(arena, html_content.len), s8("\r\n"),
+                   s8("Connection: close\r\n"),
+                   s8("X-Content-Type-Options: nosniff\r\n"),
+                   s8("X-Frame-Options: DENY\r\n"),
+                   s8("\r\n"),
+                   html_content);
+        break;
+      }
+    }
   }
   else {
     S8 not_found_html
