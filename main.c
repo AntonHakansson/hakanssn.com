@@ -1,5 +1,5 @@
 #if IN_SHELL /* $ bash main.c
- cc main.c -o main -fsanitize=undefined -g3 -Os -Wall -Wextra -Wconversion -Wno-sign-conversion -Wno-unused-function $@
+ cc main.c -o hakanssn.com -fsanitize=undefined -g3 -Os -Wall -Wextra -Wconversion -Wno-sign-conversion -Wno-unused-function $@
  exit # */
 #endif
 
