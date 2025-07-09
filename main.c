@@ -181,14 +181,16 @@ static ErrList *errors_make(Arena *arena, Iz nbyte) {
   return r;
 }
 
-static void errors_clear_() {
+static int errors_get_max_severity_and_reset() {
+  int max_severity = errors->max_severity;
   errors->first = 0;
   errors->max_severity = 0;
   errors->arena = errors->rewind_arena;
+  return max_severity;
 }
 
 #define for_errors(varname)                                                    \
-  for (Iz _defer_i_ = 1; _defer_i_; _defer_i_--, errors_clear_())            \
+  for (Iz _defer_i_ = 1; _defer_i_; _defer_i_--)                               \
     for (Err *varname = errors->first; varname && (errors->max_severity > 0);  \
          varname = varname->next)
 
@@ -196,7 +198,7 @@ static Err *emit_err(int severity, S8 message) {
   assert(errors && errors->arena.beg);
   if ((errors->arena.end - errors->arena.beg) <
       ((Iz)sizeof(Err) + message.len + (1 << 8))) {
-    errors_clear_(); // REVIEW: force flush errors to stderr?
+    errors_get_max_severity_and_reset(); // REVIEW: force flush errors to stderr?
     emit_err(3, s8("Exceeded error memory limit. Previous errors omitted."));
   }
   Err *err = new(&errors->arena, Err, 1);
@@ -580,9 +582,9 @@ int main(int argc, char **argv)
 
   int sock_fd = socket_bind_listen(*arena, 8000, 128);
   {
-    int status_code = !!errors->max_severity;
     for_errors(err) { fprintf(stderr, "[ERROR]: %.*s\n", s8pri(err->message)); }
-    if (status_code != 0) return status_code;
+    int status_code = 0;
+    if ((status_code = errors_get_max_severity_and_reset())) return status_code;
   }
 
   signal(SIGINT,  signal_handler);  // Ctrl+C
@@ -605,9 +607,8 @@ int main(int argc, char **argv)
     S8 response = route_response(&conn_arena, client_request);
     xwrite(conn_arena, fd, response);
 
-    int status_code = !!errors->max_severity;
     for_errors(err) { fprintf(stderr, "[ERROR]: %.*s\n", s8pri(err->message)); }
-    if (status_code == 0) {
+    if (errors_get_max_severity_and_reset() == 0) {
       printf("[DEBUG]: Client gets resource: '%.*s'\n", s8pri(client_request.path));
       printf("[DEBUG]: Request Memory Usage: %ld\n",
              (conn_arena.beg - arena->beg) + (arena->end - conn_arena.end));
@@ -618,9 +619,8 @@ int main(int argc, char **argv)
 
   close(sock_fd);
 
-  int status_code = !!errors->max_severity;
   for_errors(err) { fprintf(stderr, "[ERROR]: %.*s\n", s8pri(err->message)); }
-  return status_code;
+  return !!errors_get_max_severity_and_reset();
 }
 #endif
 
@@ -647,6 +647,7 @@ int main() {
     for_errors(err) {
       fprintf(stderr, "[ERROR]: %.*s\n", s8pri(err->message));
     }
+    errors_get_max_severity_and_reset();
   }
 }
 
