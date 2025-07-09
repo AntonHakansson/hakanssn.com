@@ -461,6 +461,22 @@ static S8 posts_page(Arena *arena, WebsiteData data, S8 tags[16], Iz tags_count)
 static S8 post_page(Arena *arena, Post *post) {
   S8 s = begin_page(arena);
   s = s8concat(arena, s, s8("<section>\n"));
+
+  s = s8concat(arena, s, s8("<div class=\"tags space-s-1\">\n"));
+  for (Iz tag_i = 0; tag_i < post->tags_count; tag_i++) {
+    s = s8concat(arena, s, s8("<span>"), post->tags[tag_i], s8("</span>\n"));
+  }
+  s = s8concat(arena, s, s8("</div>\n"));
+
+  s = s8concat(arena, s, s8("<h1>"), post->title, s8("</h1>\n"));
+  s = s8concat(arena, s, s8("<div class=\"stack\">\n"));
+
+  s = s8concat(arena, s, s8("<div>\n"));
+  s = s8concat(arena, s, s8("<span class=\"font-size:small\">Created: "), post->created_at, s8("</span>\n"));
+  s = s8concat(arena, s, s8("<span class=\"font-size:small\">Updated: "), post->updated_at, s8("</span>\n"));
+  s = s8concat(arena, s, s8("</div>\n"));
+
+  s = s8concat(arena, s, s8("</div>\n"));
   s = s8concat(arena, s, post->html_content);
   s = s8concat(arena, s, s8("</section>\n"));
   s = end_page(arena, s);

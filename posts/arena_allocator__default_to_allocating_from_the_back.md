@@ -7,9 +7,6 @@ created_at: 2025-07-07
 updated_at: 2025-07-08
 ---
 
-# Arena Allocator: Default to allocating from the back!
-
-
 [The Arena Allocator](https://www.rfleury.com/p/untangling-lifetimes-the-arena-allocator)
 is a simple, yet powerful, memory management technique. However, most
 arena allocators leave untapped potential by only using one end. It
