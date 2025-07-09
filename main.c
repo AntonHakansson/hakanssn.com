@@ -368,11 +368,11 @@ static S8 end_page(Arena *arena, S8 s) {
     s8("            <a href=\"mailto:anton@hakanssn.com\">Contact</a>\n"),
     s8("        </span>\n"),
     s8("\n"),
-    /* s8("        <span class=\"with-icon\">\n"), */
-    /* s8("            <i class=\"icon fas fa-rss\"></i>\n"), */
-    /* s8("            <a href=\"hakanssn.com/rss\">Subscribe</a>\n"), */
-    /* s8("        </span>\n"), */
-    /* s8("\n"), */
+    s8("        <span class=\"with-icon\">\n"),
+    s8("            <i class=\"icon fas fa-rss\"></i>\n"),
+    s8("            <a href=\"hakanssn.com/rss\">Subscribe</a>\n"),
+    s8("        </span>\n"),
+    s8("\n"),
     s8("        <span class=\"with-icon\">\n"),
     s8("            <i class=\"icon fas fa-code\"></i>\n"),
     s8("            <a href=\"https://github.com/AntonHakansson/hakanssn.com\">View source</a>\n"),
@@ -483,6 +483,50 @@ static S8 post_page(Arena *arena, Post *post) {
   return s;
 }
 
+static S8 rss_feed(Arena *arena, WebsiteData data) {
+  S8 s = {};
+
+  S8 rss_date_format(Arena *arena, S8 date_input) {
+    return s8concat(arena, date_input, s8(" 00:00:00 GMT"));
+  }
+
+  s = s8concat(arena, s,
+    s8("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"),
+    s8("<rss version=\"2.0\" xmlns:atom=\"http://www.w3.org/2005/Atom\">\n"),
+    s8("<channel>\n"),
+    s8("  <title>hakanssn</title>\n"),
+    s8("  <link>https://hakanssn.com</link>\n"),
+    s8("  <description>hakanssn personal website, portfolio, and blog</description>\n"),
+    s8("  <language>en-us</language>\n"),
+    s8("  <atom:link href=\"https://hakanssn.com/rss\" rel=\"self\" type=\"application/rss+xml\" />\n"),
+    s8("  <generator>Custom C HTTP Server</generator>\n"));
+
+  Iz post_limit = 20;
+  for (Iz i = 0; i < data.posts_count && i < post_limit; i++) {
+    Post *post = &data.posts[i];
+
+    s = s8concat(arena, s,
+                 s8("  <item>\n"),
+                 s8("    <title>"), post->title, s8("</title>\n"),
+                 s8("    <link>https://hakanssn.com/post/"), post->slug, s8("</link>\n"),
+                 s8("    <guid>https://hakanssn.com/post/"), post->slug, s8("</guid>\n"),
+                 s8("    <description>"), post->summary, s8("</description>\n"),
+                 s8("    <pubDate>"), rss_date_format(arena, post->created_at), s8("</pubDate>\n"));
+
+    for (Iz tag_i = 0; tag_i < post->tags_count; tag_i++) {
+      s = s8concat(arena, s, s8("    <category>"), post->tags[tag_i], s8("</category>\n"));
+    }
+
+    s = s8concat(arena, s, s8("  </item>\n"));
+  }
+
+  s = s8concat(arena, s,
+    s8("</channel>\n"),
+    s8("</rss>\n"));
+
+  return s;
+}
+
 typedef struct {
   S8 path;
 } Client_Request;
@@ -536,6 +580,18 @@ static S8 route_response(Arena *arena, Client_Request request) {
                  resource->content);
       return response;
     }
+  }
+
+  if (s8equal(request.path, s8("/rss")) || s8equal(request.path, s8("/rss.xml"))) {
+    S8 content = rss_feed(arena, data);
+    S8 result = s8concat(arena, s8("HTTP/1.1 200 OK\r\n"),
+               s8("Content-Type: application/rss+xml; charset=UTF-8\r\n"),
+               s8("Content-Length: "), s8i64(arena, content.len), s8("\r\n"),
+               s8("Connection: close\r\n"),
+               s8("Cache-Control: public, max-age=43200\r\n"), // 12 hour cache
+               s8("\r\n"),
+               content);
+    return result;
   }
 
   S8 status_code_s = s8("200 OK");
