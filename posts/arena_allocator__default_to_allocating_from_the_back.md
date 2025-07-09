@@ -23,7 +23,7 @@ at the front.
 **Typical Arena implementation, without dual-ended arena allocations:**
 
 ```c
-S8 s = s8concat(arena, s, s8("Hello "));
+s = s8concat(arena, s, s8("Hello "));
 // Arena: [Hello ░░░░░░░░░░░░░░░░░░░]
 
 char *data = allocate_data(arena);  // Interrupts our string!
@@ -37,7 +37,7 @@ s = s8concat(arena, s, s8("World"));
 **With dual-ended arena allocations:**
 
 ```c
-S8 s = s8concat(arena, s, s8("Hello "));
+s = s8concat(arena, s, s8("Hello "));
 // Arena: [Hello ░░░░░░░░░░░░░░░░░░░]
 
 char *data = allocate_data(arena);
@@ -146,6 +146,6 @@ arguments like in the example above.
 
 [...]
 
-S8 s = s8concat(arena, s8("Hello"), s8("World"));
+s = s8concat(arena, s8("Hello"), s8("World"));
 // Arena: [Hello World░░░░░░░░░░░░░░░░░░░]
 ```
