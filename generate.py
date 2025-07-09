@@ -19,6 +19,7 @@ def parse_frontmatter(f: Path):
         content = file.read()
 
     frontmatter = {}
+
     lines = content.split('\n')
     in_frontmatter = False
     
@@ -108,10 +109,18 @@ with open("generated_metadata.h", "w") as generated:
     write("static Post static_posts[] = {\n")
     for f in post_files:
         frontmatter = parse_frontmatter(f)
+        tags = frontmatter.get("tags", "").split(",")
+        tags = [t.strip() for t in tags if t]
+        tags_count = len(tags)
         write("  (Post){\n")
         write(f"  .title = s8(\"{frontmatter['title']}\"),\n")
         write(f"  .slug = s8(\"{frontmatter['slug']}\"),\n")
         write(f"  .summary = s8(\"{frontmatter['summary']}\"),\n")
+        write(f"  .tags = {{")
+        for tag in tags:
+            write(f"s8(\"{tag}\"), ")
+        write(f"}},\n")
+        write(f"  .tags_count = {tags_count},\n")
         write(f"  .path = s8(\"/post/{f.name}\"),\n")
         write(f"  .html_content = (S8){{{buffer_identifier(f)}, countof({buffer_identifier(f)})}},\n")
         write(f"  .created_at = s8(\"{frontmatter['created_at']}\"),\n")

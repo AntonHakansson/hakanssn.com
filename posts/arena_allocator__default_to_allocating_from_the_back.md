@@ -2,6 +2,7 @@
 title: Arena Allocator Default to allocating from the back!
 slug: arena-allocator--default-to-allocating-from-the-back
 summary: Reserve the front of an Arena allocator for growing data structures.
+tags: C
 created_at: 2025-07-07
 updated_at: 2025-07-08
 ---

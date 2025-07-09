@@ -268,14 +268,10 @@ typedef struct {
   Iz posts_count;
 } WebsiteData;
 
-static WebsiteData data = {0};
-
-static WebsiteData get_website_data() {
-  return (WebsiteData){
-    .posts = static_posts,
-    .posts_count = countof(static_posts),
-  };
-}
+static WebsiteData data = {
+  .posts = static_posts,
+  .posts_count = countof(static_posts),
+};
 
 static void signal_handler(int sig) {
   (void)sig;
@@ -590,8 +586,6 @@ int main(int argc, char **argv)
   signal(SIGINT,  signal_handler);  // Ctrl+C
   signal(SIGTERM, signal_handler);  // kill command
 
-  data = get_website_data();
-
   while (!should_exit) {
     Arena conn_arena = *arena;
 
@@ -637,7 +631,6 @@ int main() {
   U8 *heap = malloc(HEAP_CAP);
   Arena arena[1] = { (Arena){heap, heap + HEAP_CAP}, };
   errors = errors_make(arena, 1 << 12);
-  data = get_website_data();
 
   unsigned char *buf = __AFL_FUZZ_TESTCASE_BUF;
   while (__AFL_LOOP(10000)) {
