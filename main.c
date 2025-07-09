@@ -154,33 +154,6 @@ static S8 s8i64(Arena *arena, I64 x) {
   return (S8){beg, len};
 }
 
-#include "time.h"
-#include "stdio.h"
-static S8 s8datetime(Arena *arena, I64 timestamp) {
-  time_t time = (time_t)timestamp;
-  struct tm *utc_tm = gmtime(&time);
-
-  if (!utc_tm) {
-    return s8("Invalid date");
-  }
-
-  // Format as YYYY-MM-DD HH:MM:SS UTC
-  char buffer[64];
-  int len = snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d UTC",
-                     utc_tm->tm_year + 1900,
-                     utc_tm->tm_mon + 1,
-                     utc_tm->tm_mday,
-                     utc_tm->tm_hour,
-                     utc_tm->tm_min,
-                     utc_tm->tm_sec);
-
-  if (len < 0 || len >= (int)sizeof(buffer)) {
-    return s8("Date format error");
-  }
-
-  return s8dup(arena, (S8){(U8*)buffer, len});
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 //- Error side channel
 
@@ -256,54 +229,6 @@ static Err *emit_err(int severity, S8 message) {
 #include <stdio.h>
 #include <stdlib.h>
 
-static S8 read_entire_file(Arena *arena, S8 file) {
-  S8 r = {0};
-  if (file.data) {
-    int fd = 0;
-    Iz len = 0;
-    {
-      Arena scratch = *arena;
-      char *f = s8z(&scratch, file);
-      if ((fd = open(f, O_RDONLY)) < 0) {
-        emit_errno(scratch, s8("open '"), file, s8("'"));
-        return r;
-      }
-      if ((len = lseek(fd, 0, SEEK_END)) < 0) {
-        emit_errno(scratch, s8("lseek '"), file, s8("'"));
-        goto defer;
-      }
-      if (lseek(fd, 0, SEEK_SET) < 0) {
-        emit_errno(scratch, s8("lseek '"), file, s8("'"));
-        goto defer;
-      }
-    }
-
-    U8 *beg = new(arena, U8, len + 1); // note: "+ 1" for '\0'
-    U8 *end = beg;
-    {
-      Arena scratch = *arena;
-      Iz m = len;
-      while (m > 0) {
-        Iz nbyte = 0;
-        do {
-          nbyte = read(fd, end, m);
-        } while (nbyte < 0 && errno == EINTR);
-        if (nbyte < 0) {
-          emit_errno(scratch, s8("read '"), file, s8("'"));
-          goto defer;
-        }
-        end += nbyte;
-        m   -= nbyte;
-      }
-    }
-    r = s8span(beg, end);
-
-  defer:
-    close(fd);
-  }
-  return r;
-}
-
 static void xwrite(Arena scratch, int fd, S8 content) {
   if (content.data && content.len) {
     while (content.len > 0) {
@@ -322,17 +247,8 @@ static void xwrite(Arena scratch, int fd, S8 content) {
   }
 }
 
-static void write_file(Arena scratch, S8 file, S8 file_content) {
-  if (file.data && file_content.len) {
-    int fd = open(s8z(&scratch, file), O_CREAT | O_WRONLY | O_TRUNC, 0644);
-    if (fd < 0) {
-      emit_errno(scratch, s8("open '"), file, s8("'"));
-      return;
-    }
-    xwrite(scratch, fd, file_content);
-    close(fd);
-  }
-}
+////////////////////////////////////////////////////////////////////////////////
+//- Program
 
 #include <sys/signal.h>
 #include <sys/socket.h>
@@ -432,7 +348,6 @@ static S8 begin_page(Arena *arena) {
            s8("<a href=\"/\"><img src=\"/logo.png\" alt=\"logo\" style=\"max-height: 52px;\"/></a>\n"),
            s8("<nav class=\"cluster\">\n"),
            s8("<a href=\"/post\">Posts</a>\n"),
-           /* s8("<a href=\"/project\">Projects</a>\n"), */
            s8("<a href=\"https://github.com/AntonHakansson\">Github</a>\n"),
            s8("</nav>\n"),
            s8("</div>\n"),
@@ -609,29 +524,14 @@ static S8 route_response(Arena *arena, Client_Request request) {
     }
   }
 
-  if (s8equal(request.path, s8("/post"))) {
-    S8 html_content = posts_page(arena, data, 0, 0);
-    response =
-      s8concat(arena, s8("HTTP/1.1 200 OK\r\n"),
-               s8("Content-Type: text/html; charset=UTF-8\r\n"),
-               s8("Content-Length: "), s8i64(arena, html_content.len), s8("\r\n"),
-               s8("Connection: close\r\n"),
-               s8("X-Content-Type-Options: nosniff\r\n"),
-               s8("X-Frame-Options: DENY\r\n"),
-               s8("\r\n"),
-               html_content);
+  S8 status_code_s = s8("200 OK");
+  S8 content = {0};
+
+  if (s8equal(request.path, s8("/")) || s8equal(request.path, s8("/index.html"))) {
+    content = home_page(arena, data);
   }
-  else if (s8equal(request.path, s8("/")) || s8equal(request.path, s8("/index.html"))) {
-    S8 html_content = home_page(arena, data);
-    response =
-      s8concat(arena, s8("HTTP/1.1 200 OK\r\n"),
-               s8("Content-Type: text/html; charset=UTF-8\r\n"),
-               s8("Content-Length: "), s8i64(arena, html_content.len), s8("\r\n"),
-               s8("Connection: close\r\n"),
-               s8("X-Content-Type-Options: nosniff\r\n"),
-               s8("X-Frame-Options: DENY\r\n"),
-               s8("\r\n"),
-               html_content);
+  else if (s8equal(request.path, s8("/post"))) {
+    content = posts_page(arena, data, 0, 0);
   }
   else if (s8startswith(request.path, s8("/post/"))) {
     S8 request_post = {0}; {
@@ -640,43 +540,32 @@ static S8 route_response(Arena *arena, Client_Request request) {
       slug_cut = s8cut(slug_cut.tail, '/');
       request_post = slug_cut.head;
     }
-    printf("[DEBUG]: %.*s\n", s8pri(request_post));
     for (Iz post_i = 0; post_i < data.posts_count; post_i++) {
       Post *post = &data.posts[post_i];
       if (s8equal(post->slug, request_post)) {
-        S8 html_content = post_page(arena, post);
-        response =
-          s8concat(arena, s8("HTTP/1.1 200 OK\r\n"),
-                   s8("Content-Type: text/html; charset=UTF-8\r\n"),
-                   s8("Content-Length: "), s8i64(arena, html_content.len), s8("\r\n"),
-                   s8("Connection: close\r\n"),
-                   s8("X-Content-Type-Options: nosniff\r\n"),
-                   s8("X-Frame-Options: DENY\r\n"),
-                   s8("\r\n"),
-                   html_content);
-        break;
+        content = post_page(arena, post);
       }
     }
   }
   else {
-    S8 not_found_html
+    status_code_s = s8("404 Not Found");
+    content
       = s8concat(arena,
                  s8("<!DOCTYPE html>\n"),
                  s8("<html><head><title>404 Not Found</title></head>\n"),
                  s8("<body><h1>404 Not Found</h1>\n"),
                  s8("<p>The requested resource was not found.</p></body></html>\n"));
-
-    response
-      = s8concat(arena,
-                 s8("HTTP/1.1 404 Not Found\r\n"),
-                 s8("Content-Type: text/html; charset=UTF-8\r\n"),
-                 s8("Content-Length: "), s8i64(arena, not_found_html.len), s8("\r\n"),
-                 s8("Connection: close\r\n"),
-                 s8("\r\n"),
-                 not_found_html);
   }
 
-  return response;
+  S8 result = s8concat(arena, s8("HTTP/1.1 "), status_code_s, s8("\r\n"),
+               s8("Content-Type: text/html; charset=UTF-8\r\n"),
+               s8("Content-Length: "), s8i64(arena, content.len), s8("\r\n"),
+               s8("Connection: close\r\n"),
+               s8("X-Content-Type-Options: nosniff\r\n"),
+               s8("X-Frame-Options: DENY\r\n"),
+               s8("\r\n"),
+               content);
+  return result;
 }
 
 #if !__AFL_COMPILER
