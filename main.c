@@ -370,7 +370,7 @@ static S8 end_page(Arena *arena, S8 s) {
     s8("\n"),
     s8("        <span class=\"with-icon\">\n"),
     s8("            <i class=\"icon fas fa-rss\"></i>\n"),
-    s8("            <a href=\"hakanssn.com/rss\">Subscribe</a>\n"),
+    s8("            <a href=\"/rss\">Subscribe</a>\n"),
     s8("        </span>\n"),
     s8("\n"),
     s8("        <span class=\"with-icon\">\n"),
