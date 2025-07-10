@@ -510,7 +510,7 @@ static S8 rss_feed(Arena *arena, WebsiteData data) {
                  s8("    <title>"), post->title, s8("</title>\n"),
                  s8("    <link>https://hakanssn.com/post/"), post->slug, s8("</link>\n"),
                  s8("    <guid>https://hakanssn.com/post/"), post->slug, s8("</guid>\n"),
-                 s8("    <description>"), post->summary, s8("</description>\n"),
+                 s8("    <description>"), post->html_content, s8("</description>\n"),
                  s8("    <pubDate>"), rss_date_format(arena, post->created_at), s8("</pubDate>\n"));
 
     for (Iz tag_i = 0; tag_i < post->tags_count; tag_i++) {
