@@ -224,20 +224,20 @@ static Err *emit_err(int severity, S8 message) {
 ////////////////////////////////////////////////////////////////////////////////
 //- File I/O
 
+#include <sys/socket.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-static void xwrite(Arena scratch, int fd, S8 content) {
+static void sendall(Arena scratch, int fd, S8 content) {
   if (content.data && content.len) {
     while (content.len > 0) {
       Iz m = content.len;
       Iz nbyte = 0;
       do {
-        nbyte = write(fd, content.data, m);
+        nbyte = send(fd, content.data, m, 0);
       } while (nbyte < 0 && errno == EINTR);
       if (nbyte < 0) {
         emit_errno(scratch, s8("write"));
@@ -535,31 +535,35 @@ static Client_Request parse_client_request(S8 request) {
   Client_Request r = {0};
   r.path = s8("/");
 
-  S8pair linecut = { {}, request};
-  while ((linecut = s8cut(linecut.tail, '\n')).head.data) {
-    if (s8startswith(linecut.head, s8("GET "))) {
-      S8pair get_parts = {{}, linecut.head};
-      get_parts = s8cut(get_parts.tail, ' '); // discard GET
-      get_parts = s8cut(get_parts.tail, ' ');
-      _Bool is_valid_path(S8 s) {
-        // Only allow a-z, ., -, and /
-        _Bool valid = 0;
-        for (Iz i = 0; i < s.len; i++) {
-          _Bool is_alpha_lower = s.data[i] >= 'a' && s.data[i] <= 'z';
-          valid = is_alpha_lower || s.data[i] == '/' || s.data[i] == '.' || s.data[i] == '-';
-          if (!valid) return 0;
-        }
-        return valid;
+  S8pair linecut = {{}, request};
+  linecut = s8cut(linecut.tail, '\n');
+  if (s8startswith(linecut.head, s8("GET "))) {
+    S8pair get_parts = {{}, linecut.head};
+    get_parts = s8cut(get_parts.tail, ' '); // discard GET
+    get_parts = s8cut(get_parts.tail, ' ');
+    _Bool is_valid_path(S8 s) {
+      // Only allow a-z, ., -, and /
+      _Bool valid = 0;
+      for (Iz i = 0; i < s.len; i++) {
+        _Bool is_alpha_lower = s.data[i] >= 'a' && s.data[i] <= 'z';
+        valid = is_alpha_lower || s.data[i] == '/' || s.data[i] == '.' || s.data[i] == '-';
+        if (!valid) return 0;
       }
-      if (is_valid_path(get_parts.head)) {
-        r.path = get_parts.head;
-      }
-      else {
-        printf("[DEBUG]: Client wants invalid resource: '%.*s'\n", s8pri(get_parts.head));
-      }
-      break; // REVIEW: Remove break statement if we ever parse more than GET header
+      return valid;
     }
+    if (is_valid_path(get_parts.head)) {
+      r.path = get_parts.head;
+    }
+    else {
+      printf("[DEBUG]: Client wants invalid resource: '%.*s'\n", s8pri(get_parts.head));
+    }
+  } else {
+    emit_err(1, s8("Unhandled request, request does not start with 'GET '"));
+    return r;
   }
+
+  // REVIEW: respect optional additional header
+  // while ((linecut = s8cut(linecut.tail, '\n')).head.data) {}
 
   return r;
 }
@@ -662,22 +666,22 @@ int main(int argc, char **argv)
     Arena conn_arena = *arena;
 
     int fd = accept(sock_fd, 0, 0);
-    if (fd < 0) { emit_errno(conn_arena, s8("accept")); }
+    if (fd < 0) { emit_errno(conn_arena, s8("accept")); continue; }
 
     Client_Request client_request = {0}; {
-      Iz read_buffer_len = 1024;
-      U8 *read_buffer = new(&conn_arena, U8, 1024);
-      ssize_t nbyte = read(fd, read_buffer, read_buffer_len);
+      Iz read_buffer_len = 64;
+      U8 *read_buffer = new(&conn_arena, U8, read_buffer_len);
+      ssize_t nbyte = recv(fd, read_buffer, read_buffer_len, 0);
       client_request = parse_client_request((S8){read_buffer, nbyte});
     }
     S8 response = route_response(&conn_arena, client_request);
-    xwrite(conn_arena, fd, response);
+    sendall(conn_arena, fd, response);
 
     for_errors(err) { fprintf(stderr, "[ERROR]: %.*s\n", s8pri(err->message)); }
     if (errors_get_max_severity_and_reset() == 0) {
       printf("[DEBUG]: Client gets resource: '%.*s'\n", s8pri(client_request.path));
-      printf("[DEBUG]: Request Memory Usage: %ld\n",
-             (conn_arena.beg - arena->beg) + (arena->end - conn_arena.end));
+      Iz memory_used = (conn_arena.beg - arena->beg) + (arena->end - conn_arena.end);
+      printf("[DEBUG]: Request Memory Usage: %ld\n", memory_used);
     }
 
     close(fd);
