@@ -215,7 +215,9 @@ static Err *emit_err(int severity, S8 message) {
 #define emit_errno(scratch, ...)                                               \
   do {                                                                         \
     S8 msg = {0};                                                              \
-    msg = s8concat(&scratch, msg, __VA_ARGS__, s8(": "),                       \
+    msg = s8concat(&scratch, s8(__FILE_NAME__),                                \
+                   s8("("), s8i64(&scratch, __LINE__), s8("): "),              \
+                   __VA_ARGS__, s8(": "),                                      \
                    s8cstr(&scratch, strerror(errno)));                         \
     emit_err(3, msg);                                                          \
   } while (0);
@@ -228,11 +230,13 @@ static Err *emit_err(int severity, S8 message) {
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <errno.h>
 
 #include <sys/signal.h>
 #include <sys/socket.h>
-#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/epoll.h>
 #include <sys/uio.h> // writev
 
 #define HEAP_CAP (1u << 28)
@@ -257,6 +261,19 @@ static void signal_handler(int sig) {
   should_exit = 1;
 }
 
+int fctl_make_nonblocking(Arena scratch, int fd) {
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0) {
+    emit_errno(scratch, s8("fcntl(F_GETFL)"));
+    return -1;
+  }
+  if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+    emit_errno(scratch, s8("fcntl(F_SETFL)"));
+    return -1;
+  }
+  return 0;
+}
+
 static int socket_bind_listen(Arena scratch, unsigned short port, int n_backlog) {
   int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (sock_fd < 0) {
@@ -276,8 +293,12 @@ static int socket_bind_listen(Arena scratch, unsigned short port, int n_backlog)
 
   struct sockaddr_in server_addr = {0};
   server_addr.sin_family = AF_INET;
-  server_addr.sin_port = htons(port);       // Convert to network byte order
-  server_addr.sin_addr.s_addr = INADDR_ANY; // Bind to all interfaces
+  server_addr.sin_port = htons(port);
+  server_addr.sin_addr.s_addr = INADDR_ANY;
+
+  if (fctl_make_nonblocking(scratch, sock_fd) < 0) {
+    goto err_op;
+  }
 
   if ((bind(sock_fd, (struct sockaddr *)&server_addr, sizeof(server_addr))) < 0) {
     emit_errno(scratch, s8("bind"));
@@ -420,7 +441,7 @@ static S8 get_posts_listing(Arena *arena, WebsiteData data, Iz count) {
 static S8 home_page(Arena *arena, WebsiteData data) {
   S8 s = {};
   s = begin_page(arena);
-  
+
   s = s8concat(arena, s,
                s8("<section>\n"
                  "<h1>About</h1>\n"
@@ -654,6 +675,24 @@ static HTTP_Response route_response(Arena *arena, Client_Request request) {
 #if !__AFL_COMPILER
 #ifndef HK_NO_MAIN
 
+int epoll_create_poll(Arena scratch, int fd) {
+  int epoll_fd = epoll_create1(0);
+  if (epoll_fd < 0) {
+    emit_errno(scratch, s8("epoll_create"));
+    return -1;
+  }
+
+  struct epoll_event event = {0};
+  event.events = EPOLLIN;
+  event.data.fd = fd;
+  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &event) < 0) {
+    emit_errno(scratch, s8("epoll_ctl"));
+    return -1;
+  }
+
+  return epoll_fd;
+}
+
 int main(int argc, char **argv)
 {
   (void) argc, (void) argv;
@@ -662,41 +701,76 @@ int main(int argc, char **argv)
 
   errors = errors_make(arena, 1 << 12);
 
+  signal(SIGINT,  signal_handler);  // Ctrl+C
+  signal(SIGTERM, signal_handler);  // kill command
+
   int sock_fd = socket_bind_listen(*arena, 8000, 128);
+  int epoll_fd = epoll_create_poll(*arena, sock_fd);
   {
     for_errors(err) { fprintf(stderr, "[ERROR]: %.*s\n", s8pri(err->message)); }
     int status_code = 0;
     if ((status_code = errors_get_max_severity_and_reset())) return status_code;
   }
 
-  signal(SIGINT,  signal_handler);  // Ctrl+C
-  signal(SIGTERM, signal_handler);  // kill command
-
   while (!should_exit) {
     Arena conn_arena = *arena;
 
-    int fd = accept(sock_fd, 0, 0);
-    if (fd < 0) { emit_errno(conn_arena, s8("accept")); continue; }
-
-    Client_Request client_request = {0}; {
-      Iz read_buffer_len = 64;
-      U8 *read_buffer = new(&conn_arena, U8, read_buffer_len);
-      ssize_t nbyte = recv(fd, read_buffer, read_buffer_len, 0);
-      client_request = parse_client_request((S8){read_buffer, nbyte});
-    }
-    HTTP_Response response = route_response(&conn_arena, client_request);
-    send_http(conn_arena, fd, response.headers, response.body);
-
-    for_errors(err) { fprintf(stderr, "[ERROR]: %.*s\n", s8pri(err->message)); }
-    if (errors_get_max_severity_and_reset() == 0) {
-      printf("[DEBUG]: Client gets resource: '%.*s'\n", s8pri(client_request.path));
-      Iz memory_used = (conn_arena.beg - arena->beg) + (arena->end - conn_arena.end);
-      printf("[DEBUG]: Request Memory Usage: %ld\n", memory_used);
+    struct epoll_event events[64];
+    int nfds = epoll_wait(epoll_fd, events, countof(events), -1);
+    if (nfds < 0) {
+      emit_errno(conn_arena, s8("epoll_wait"));
+      return 1;
     }
 
-    close(fd);
+    for (int event_i = 0; event_i < nfds; event_i++) {
+      struct epoll_event event = events[event_i];
+
+      if (event.data.fd == sock_fd) {
+        // New connection event
+        int client_fd = accept(sock_fd, 0, 0);
+        if (client_fd < 0) {
+          if (errno != EAGAIN && errno != EWOULDBLOCK)
+            emit_errno(conn_arena, s8("accept"));
+          continue;
+        }
+        fctl_make_nonblocking(conn_arena, client_fd);
+        event.events = EPOLLIN | EPOLLET;
+        event.data.fd = client_fd;
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) < 0) {
+          emit_errno(conn_arena, s8("epoll_ctl"));
+          close(client_fd);
+          continue;
+        }
+      }
+      else {
+        // Client data ready
+        char read_buffer[64];
+        ssize_t nbyte = recv(event.data.fd, read_buffer, countof(read_buffer), 0);
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          continue;
+        }
+        else if (nbyte < 0) {
+          emit_errno(conn_arena, s8("recv"));
+        }
+        else if (nbyte == 0) {
+          // Connection closed
+        } else {
+          Client_Request client_request = parse_client_request((S8){(U8 *)read_buffer, nbyte});
+          HTTP_Response response = route_response(&conn_arena, client_request);
+          send_http(conn_arena, event.data.fd, response.headers, response.body);
+        }
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, event.data.fd, 0) < 0) {
+          emit_errno(conn_arena, s8("epoll_ctl"));
+        }
+        close(event.data.fd);
+
+        for_errors(err) { fprintf(stderr, "[ERROR]: %.*s\n", s8pri(err->message)); }
+        errors_get_max_severity_and_reset();
+      }
+    }
   }
 
+  close(epoll_fd);
   close(sock_fd);
 
   for_errors(err) { fprintf(stderr, "[ERROR]: %.*s\n", s8pri(err->message)); }
