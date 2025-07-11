@@ -222,39 +222,18 @@ static Err *emit_err(int severity, S8 message) {
 
 
 ////////////////////////////////////////////////////////////////////////////////
-//- File I/O
+//- Program
 
-#include <sys/socket.h>
-#include <unistd.h>
-#include <string.h>
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
-
-static void sendall(Arena scratch, int fd, S8 content) {
-  if (content.data && content.len) {
-    while (content.len > 0) {
-      Iz m = content.len;
-      Iz nbyte = 0;
-      do {
-        nbyte = send(fd, content.data, m, 0);
-      } while (nbyte < 0 && errno == EINTR);
-      if (nbyte < 0) {
-        emit_errno(scratch, s8("write"));
-        return;
-      }
-      content.data += nbyte;
-      content.len -= nbyte;
-    }
-  }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-//- Program
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
 
 #include <sys/signal.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <sys/uio.h> // writev
 
 #define HEAP_CAP (1u << 28)
 
@@ -314,6 +293,29 @@ static int socket_bind_listen(Arena scratch, unsigned short port, int n_backlog)
 
 err_op:
   close(sock_fd);
+  return 0;
+}
+
+static int send_http(Arena scratch, int sock, S8 headers, S8 body) {
+  if (headers.len <= 0 && body.len <= 0) return 0;
+
+  Iz total = headers.len + body.len;
+
+  struct iovec iov[2] = {0};
+  iov[0].iov_base = headers.data;
+  iov[0].iov_len = headers.len;
+  iov[1].iov_base = (void*)body.data;
+  iov[1].iov_len = body.len;
+
+  ssize_t nbyte = writev(sock, iov, countof(iov));
+  if (nbyte < 0) {
+    emit_errno(scratch, s8("writev"));
+    return -1;
+  }
+  if (nbyte != total) {
+    emit_err(1, s8("Unhandled partial write!"));
+  }
+
   return 0;
 }
 
@@ -568,33 +570,39 @@ static Client_Request parse_client_request(S8 request) {
   return r;
 }
 
-static S8 route_response(Arena *arena, Client_Request request) {
-  S8 response = {};
+typedef struct {
+  S8 headers;
+  S8 body;
+} HTTP_Response;
+
+static HTTP_Response route_response(Arena *arena, Client_Request request) {
+  HTTP_Response result = {0};
 
   for (Iz i = 0; i < countof(static_route_mapping); i++) {
     StaticRouteMapping *resource = &static_route_mapping[i];
     if (s8equal(request.path, resource->path)) {
-      response =
-        s8concat(arena, s8("HTTP/1.1 200 OK\r\n"),
-                 s8("Content-Type: "), resource->content_type, s8("\r\n"),
-                 s8("Content-Length: "), s8i64(arena, resource->content.len), s8("\r\n"),
-                 s8("Connection: close\r\n"),
-                 s8("Cache-Control: public, max-age=86400\r\n"), // Cache for 1 day
-                 s8("\r\n"),
-                 resource->content);
-      return response;
+      result.headers = s8concat(
+          arena, s8("HTTP/1.1 200 OK\r\n"), s8("Content-Type: "),
+          resource->content_type, s8("\r\n"), s8("Content-Length: "),
+          s8i64(arena, resource->content.len), s8("\r\n"),
+          s8("Connection: close\r\n"),
+          s8("Cache-Control: public, max-age=86400\r\n"), // Cache for 1 day
+          s8("\r\n"));
+      result.body = resource->content;
+      return result;
     }
   }
 
   if (s8equal(request.path, s8("/rss")) || s8equal(request.path, s8("/rss.xml"))) {
     S8 content = rss_feed(arena, data);
-    S8 result = s8concat(arena, s8("HTTP/1.1 200 OK\r\n"),
-               s8("Content-Type: application/rss+xml; charset=UTF-8\r\n"),
-               s8("Content-Length: "), s8i64(arena, content.len), s8("\r\n"),
-               s8("Connection: close\r\n"),
-               s8("Cache-Control: public, max-age=43200\r\n"), // 12 hour cache
-               s8("\r\n"),
-               content);
+    result.headers = s8concat(
+        arena, s8("HTTP/1.1 200 OK\r\n"),
+        s8("Content-Type: application/rss+xml; charset=UTF-8\r\n"),
+        s8("Content-Length: "), s8i64(arena, content.len), s8("\r\n"),
+        s8("Connection: close\r\n"),
+        s8("Cache-Control: public, max-age=43200\r\n"), // 12 hour cache
+        s8("\r\n"));
+    result.body = content;
     return result;
   }
 
@@ -631,18 +639,20 @@ static S8 route_response(Arena *arena, Client_Request request) {
                  s8("<p>The requested resource was not found.</p></body></html>\n"));
   }
 
-  S8 result = s8concat(arena, s8("HTTP/1.1 "), status_code_s, s8("\r\n"),
-               s8("Content-Type: text/html; charset=UTF-8\r\n"),
-               s8("Content-Length: "), s8i64(arena, content.len), s8("\r\n"),
-               s8("Connection: close\r\n"),
-               s8("X-Content-Type-Options: nosniff\r\n"),
-               s8("X-Frame-Options: DENY\r\n"),
-               s8("\r\n"),
-               content);
+  result.headers =
+    s8concat(arena, s8("HTTP/1.1 "), status_code_s, s8("\r\n"),
+             s8("Content-Type: text/html; charset=UTF-8\r\n"),
+             s8("Content-Length: "), s8i64(arena, content.len), s8("\r\n"),
+             s8("Connection: close\r\n"),
+             s8("X-Content-Type-Options: nosniff\r\n"),
+             s8("X-Frame-Options: DENY\r\n"),
+             s8("\r\n"));
+  result.body = content;
   return result;
 }
 
 #if !__AFL_COMPILER
+#ifndef HK_NO_MAIN
 
 int main(int argc, char **argv)
 {
@@ -674,8 +684,8 @@ int main(int argc, char **argv)
       ssize_t nbyte = recv(fd, read_buffer, read_buffer_len, 0);
       client_request = parse_client_request((S8){read_buffer, nbyte});
     }
-    S8 response = route_response(&conn_arena, client_request);
-    sendall(conn_arena, fd, response);
+    HTTP_Response response = route_response(&conn_arena, client_request);
+    send_http(conn_arena, fd, response.headers, response.body);
 
     for_errors(err) { fprintf(stderr, "[ERROR]: %.*s\n", s8pri(err->message)); }
     if (errors_get_max_severity_and_reset() == 0) {
@@ -692,6 +702,7 @@ int main(int argc, char **argv)
   for_errors(err) { fprintf(stderr, "[ERROR]: %.*s\n", s8pri(err->message)); }
   return !!errors_get_max_severity_and_reset();
 }
+#endif
 #endif
 
 
@@ -712,7 +723,7 @@ int main() {
   while (__AFL_LOOP(10000)) {
     int len = __AFL_FUZZ_TESTCASE_LEN;
     Client_Request client_request = parse_client_request((S8){buf, len});
-    S8 response = route_response(arena, client_request);
+    HTTP_Response response = route_response(arena, client_request);
     for_errors(err) {
       fprintf(stderr, "[ERROR]: %.*s\n", s8pri(err->message));
     }
