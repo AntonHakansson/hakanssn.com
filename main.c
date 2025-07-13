@@ -12,6 +12,7 @@
 #define s8(s)            (S8){(U8 *)s, countof(s)-1}
 #define memcpy(d, s, n)  __builtin_memcpy(d, s, n)
 #define memset(d, c, n)  __builtin_memset(d, c, n)
+#define min(a, b)        (((a) < (b)) ? (a) : (b))
 
 typedef unsigned char U8;
 typedef signed long long I64;
@@ -321,21 +322,28 @@ static int send_http(Arena scratch, int sock, S8 headers, S8 body) {
   if (headers.len <= 0 && body.len <= 0) return 0;
 
   Iz total = headers.len + body.len;
-
-  struct iovec iov[2] = {0};
-  iov[0].iov_base = headers.data;
-  iov[0].iov_len = headers.len;
-  iov[1].iov_base = (void*)body.data;
-  iov[1].iov_len = body.len;
-
-  ssize_t nbyte = writev(sock, iov, countof(iov));
-  if (nbyte < 0) {
-    emit_errno(scratch, s8("writev"));
-    return -1;
-  }
-  if (nbyte != total) {
-    emit_err(1, s8("Unhandled partial write!"));
-  }
+  Iz total_written = 0;
+  Iz written[2] = {};
+  do {
+    struct iovec iov[2] = {0};
+    iov[0].iov_base = headers.data + written[0];
+    iov[0].iov_len  = headers.len - written[0];
+    iov[1].iov_base = body.data + written[1];
+    iov[1].iov_len  = body.len - written[1];
+    int iov_off   = written[0] + written[1] < headers.len ? 0 : 1;
+    ssize_t nbyte = writev(sock, &iov[iov_off], countof(iov) - iov_off);
+    if (nbyte < 0) {
+      if (errno == EINTR) { continue; }
+      // REVIEW: EAGAIN might busy loop write, in future we might
+      // track 'written' in transient state per connection.
+      if (errno == EAGAIN || errno == EWOULDBLOCK) { continue; }
+      emit_errno(scratch, s8("writev"));
+      return -1;  // Real error
+    }
+    total_written += nbyte;
+    written[0] = min(total_written, headers.len);
+    written[1] = total_written > headers.len ? total_written - headers.len : 0;
+  } while (total_written < total);
 
   return 0;
 }
