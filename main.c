@@ -718,6 +718,7 @@ int main(int argc, char **argv)
     struct epoll_event events[64];
     int nfds = epoll_wait(epoll_fd, events, countof(events), -1);
     if (nfds < 0) {
+      if (errno == EINTR) { continue; }
       emit_errno(conn_arena, s8("epoll_wait"));
       return 1;
     }
