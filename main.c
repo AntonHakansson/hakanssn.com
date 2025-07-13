@@ -160,19 +160,25 @@ static S8 s8i64(Arena *arena, I64 x) {
 
 extern __thread struct ErrList *errors;
 
+typedef enum Error_Severity {
+  Error_Severity_None,
+  Error_Severity_Warning,
+  Error_Severity_Error,
+} Error_Severity;
+
 typedef struct Err Err;
 struct Err {
   Err *next;
-  int severity;
+  Error_Severity severity;
   S8 message;
 };
 
 typedef struct ErrList {
   Arena arena;
+  Arena rewind_arena; // [beg, end) range for rewinding above arena
   Arena scratch;
-  Arena rewind_arena; // [beg, end) range for rewinding arena
   Err *first;
-  int max_severity;
+  Error_Severity max_severity;
 } ErrList;
 
 static ErrList *errors_make(Arena *arena, Iz nbyte) {
@@ -187,10 +193,10 @@ static ErrList *errors_make(Arena *arena, Iz nbyte) {
   return r;
 }
 
-static int errors_get_max_severity_and_reset() {
-  int max_severity = errors->max_severity;
+static Error_Severity errors_get_max_severity_and_reset() {
+  Error_Severity max_severity = errors->max_severity;
   errors->first = 0;
-  errors->max_severity = 0;
+  errors->max_severity = Error_Severity_None;
   errors->arena = errors->rewind_arena;
   return max_severity;
 }
@@ -200,13 +206,13 @@ static int errors_get_max_severity_and_reset() {
     for (Err *varname = errors->first; varname && (errors->max_severity > 0);  \
          varname = varname->next)
 
-static Err *emit_err(int severity, S8 message) {
+static Err *emit_err(Error_Severity severity, S8 message) {
   assert(errors && errors->arena.beg);
   _Bool arena_exhausted = (errors->arena.end - errors->arena.beg) < ((Iz)sizeof(Err) + message.len);
   if (arena_exhausted) {
     // REVIEW: force flush existing errors to stderr instead?
     errors_get_max_severity_and_reset();
-    emit_err(3, s8("Exceeded error memory limit. Previous errors omitted."));
+    emit_err(Error_Severity_Error, s8("Exceeded error memory limit. Previous errors omitted."));
   }
   Err *err = new(&errors->arena, Err, 1);
   err->severity = severity;
@@ -226,7 +232,7 @@ static Err *emit_err(int severity, S8 message) {
                    s8("("), s8i64(&scratch, __LINE__), s8("): "),              \
                    __VA_ARGS__, s8(": "),                                      \
                    s8cstr(&scratch, strerror(errno)));                         \
-    emit_err(3, msg);                                                          \
+    emit_err(Error_Severity_Error, msg);                                           \
   } while (0);
 
 
@@ -595,7 +601,7 @@ static Client_Request parse_client_request(S8 request) {
       printf("[DEBUG]: Client wants invalid resource: '%.*s'\n", s8pri(get_parts.head));
     }
   } else {
-    emit_err(1, s8("Unhandled request, request does not start with 'GET '"));
+    emit_err(Error_Severity_Warning, s8("Unhandled request, request does not start with 'GET '"));
     return r;
   }
 
