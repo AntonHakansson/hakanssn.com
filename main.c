@@ -168,8 +168,9 @@ struct Err {
 };
 
 typedef struct ErrList {
-  Arena rewind_arena; // original [beg, end) range for rewinding
   Arena arena;
+  Arena scratch;
+  Arena rewind_arena; // [beg, end) range for rewinding arena
   Err *first;
   int max_severity;
 } ErrList;
@@ -178,7 +179,11 @@ static ErrList *errors_make(Arena *arena, Iz nbyte) {
   assert(errors == 0);
   ErrList *r = new(arena, ErrList, 1);
   U8 *beg = new(arena, U8, nbyte);
-  r->arena = r->rewind_arena = (Arena){beg, beg + nbyte};
+  r->arena = (Arena){beg, beg + nbyte};
+  Iz scratch_nbyte = 2048;
+  U8 *scratch_beg = new(&r->arena, U8, scratch_nbyte);
+  r->scratch = (Arena){scratch_beg, scratch_beg + scratch_nbyte};
+  r->rewind_arena = r->arena;
   return r;
 }
 
@@ -197,9 +202,10 @@ static int errors_get_max_severity_and_reset() {
 
 static Err *emit_err(int severity, S8 message) {
   assert(errors && errors->arena.beg);
-  if ((errors->arena.end - errors->arena.beg) <
-      ((Iz)sizeof(Err) + message.len + (1 << 8))) {
-    errors_get_max_severity_and_reset(); // REVIEW: force flush errors to stderr?
+  _Bool arena_exhausted = (errors->arena.end - errors->arena.beg) < ((Iz)sizeof(Err) + message.len);
+  if (arena_exhausted) {
+    // REVIEW: force flush existing errors to stderr instead?
+    errors_get_max_severity_and_reset();
     emit_err(3, s8("Exceeded error memory limit. Previous errors omitted."));
   }
   Err *err = new(&errors->arena, Err, 1);
@@ -213,10 +219,10 @@ static Err *emit_err(int severity, S8 message) {
   return err;
 }
 
-#define emit_errno(scratch, ...)                                               \
+#define emit_errno(...)                                                        \
   do {                                                                         \
-    S8 msg = {0};                                                              \
-    msg = s8concat(&scratch, s8(__FILE_NAME__),                                \
+    Arena scratch = errors->scratch;                                           \
+    S8 msg = s8concat(&scratch, s8(__FILE_NAME__),                             \
                    s8("("), s8i64(&scratch, __LINE__), s8("): "),              \
                    __VA_ARGS__, s8(": "),                                      \
                    s8cstr(&scratch, strerror(errno)));                         \
@@ -262,33 +268,33 @@ static void signal_handler(int sig) {
   should_exit = 1;
 }
 
-int fctl_make_nonblocking(Arena scratch, int fd) {
+int fctl_make_nonblocking(int fd) {
   int flags = fcntl(fd, F_GETFL, 0);
   if (flags < 0) {
-    emit_errno(scratch, s8("fcntl(F_GETFL)"));
+    emit_errno(s8("fcntl(F_GETFL)"));
     return -1;
   }
   if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-    emit_errno(scratch, s8("fcntl(F_SETFL)"));
+    emit_errno(s8("fcntl(F_SETFL)"));
     return -1;
   }
   return 0;
 }
 
-static int socket_bind_listen(Arena scratch, unsigned short port, int n_backlog) {
+static int socket_bind_listen(unsigned short port, int n_backlog) {
   int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (sock_fd < 0) {
-    emit_errno(scratch, s8("socket"));
+    emit_errno(s8("socket"));
     return 0;
   }
 
   int enable_reuse = 1;
   if ((setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &enable_reuse, sizeof(enable_reuse))) < 0) {
-    emit_errno(scratch, s8("setsockopt"));
+    emit_errno(s8("setsockopt"));
     goto err_op;
   }
   if ((setsockopt(sock_fd, SOL_SOCKET, SO_REUSEPORT, &enable_reuse, sizeof(enable_reuse))) < 0) {
-    emit_errno(scratch, s8("setsockopt"));
+    emit_errno(s8("setsockopt"));
     goto err_op;
   }
 
@@ -297,17 +303,17 @@ static int socket_bind_listen(Arena scratch, unsigned short port, int n_backlog)
   server_addr.sin_port = htons(port);
   server_addr.sin_addr.s_addr = INADDR_ANY;
 
-  if (fctl_make_nonblocking(scratch, sock_fd) < 0) {
+  if (fctl_make_nonblocking(sock_fd) < 0) {
     goto err_op;
   }
 
   if ((bind(sock_fd, (struct sockaddr *)&server_addr, sizeof(server_addr))) < 0) {
-    emit_errno(scratch, s8("bind"));
+    emit_errno(s8("bind"));
     goto err_op;
   }
 
   if ((listen(sock_fd, n_backlog)) < 0) {
-    emit_errno(scratch, s8("listen"));
+    emit_errno(s8("listen"));
     goto err_op;
   }
 
@@ -318,7 +324,7 @@ err_op:
   return 0;
 }
 
-static int send_http(Arena scratch, int sock, S8 headers, S8 body) {
+static int send_http(int sock, S8 headers, S8 body) {
   if (headers.len <= 0 && body.len <= 0) return 0;
 
   Iz total = headers.len + body.len;
@@ -337,7 +343,7 @@ static int send_http(Arena scratch, int sock, S8 headers, S8 body) {
       // REVIEW: EAGAIN might busy loop write, in future we might
       // track 'written' in transient state per connection.
       if (errno == EAGAIN || errno == EWOULDBLOCK) { continue; }
-      emit_errno(scratch, s8("writev"));
+      emit_errno(s8("writev"));
       return -1;  // Real error
     }
     total_written += nbyte;
@@ -683,10 +689,10 @@ static HTTP_Response route_response(Arena *arena, Client_Request request) {
 #if !__AFL_COMPILER
 #ifndef HK_NO_MAIN
 
-int epoll_create_poll(Arena scratch, int fd) {
+int epoll_create_poll(int fd) {
   int epoll_fd = epoll_create1(0);
   if (epoll_fd < 0) {
-    emit_errno(scratch, s8("epoll_create"));
+    emit_errno(s8("epoll_create"));
     return -1;
   }
 
@@ -694,7 +700,7 @@ int epoll_create_poll(Arena scratch, int fd) {
   event.events = EPOLLIN;
   event.data.fd = fd;
   if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &event) < 0) {
-    emit_errno(scratch, s8("epoll_ctl"));
+    emit_errno(s8("epoll_ctl"));
     return -1;
   }
 
@@ -712,8 +718,8 @@ int main(int argc, char **argv)
   signal(SIGINT,  signal_handler);  // Ctrl+C
   signal(SIGTERM, signal_handler);  // kill command
 
-  int sock_fd = socket_bind_listen(*arena, 8000, 128);
-  int epoll_fd = epoll_create_poll(*arena, sock_fd);
+  int sock_fd = socket_bind_listen(8000, 128);
+  int epoll_fd = epoll_create_poll(sock_fd);
   {
     for_errors(err) { fprintf(stderr, "[ERROR]: %.*s\n", s8pri(err->message)); }
     int status_code = 0;
@@ -727,7 +733,7 @@ int main(int argc, char **argv)
     int nfds = epoll_wait(epoll_fd, events, countof(events), -1);
     if (nfds < 0) {
       if (errno == EINTR) { continue; }
-      emit_errno(conn_arena, s8("epoll_wait"));
+      emit_errno(s8("epoll_wait"));
       return 1;
     }
 
@@ -739,14 +745,14 @@ int main(int argc, char **argv)
         int client_fd = accept(sock_fd, 0, 0);
         if (client_fd < 0) {
           if (errno != EAGAIN && errno != EWOULDBLOCK)
-            emit_errno(conn_arena, s8("accept"));
+            emit_errno(s8("accept"));
           continue;
         }
-        fctl_make_nonblocking(conn_arena, client_fd);
+        fctl_make_nonblocking(client_fd);
         event.events = EPOLLIN | EPOLLET;
         event.data.fd = client_fd;
         if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) < 0) {
-          emit_errno(conn_arena, s8("epoll_ctl"));
+          emit_errno(s8("epoll_ctl"));
           close(client_fd);
           continue;
         }
@@ -759,17 +765,17 @@ int main(int argc, char **argv)
           continue;
         }
         else if (nbyte < 0) {
-          emit_errno(conn_arena, s8("recv"));
+          emit_errno(s8("recv"));
         }
         else if (nbyte == 0) {
           // Connection closed
         } else {
           Client_Request client_request = parse_client_request((S8){(U8 *)read_buffer, nbyte});
           HTTP_Response response = route_response(&conn_arena, client_request);
-          send_http(conn_arena, event.data.fd, response.headers, response.body);
+          send_http(event.data.fd, response.headers, response.body);
         }
         if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, event.data.fd, 0) < 0) {
-          emit_errno(conn_arena, s8("epoll_ctl"));
+          emit_errno(s8("epoll_ctl"));
         }
         close(event.data.fd);
 
